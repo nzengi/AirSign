@@ -1,0 +1,87 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/afterimage-core",
+    "crates/afterimage-optical",
+    "crates/afterimage-cli",
+    "crates/afterimage-solana",
+    "crates/afterimage-wasm",
+]
+
+[workspace.package]
+version      = "2.0.0"
+edition      = "2021"
+authors      = ["AfterImage Contributors"]
+license      = "AGPL-3.0-or-later"
+repository   = "https://github.com/nzengi/AfterImage"
+keywords     = ["air-gap", "qr-code", "fountain-codes", "cryptography", "optical"]
+categories   = ["cryptography", "multimedia"]
+
+# Shared dependency versions — bump once, affects all crates
+[workspace.dependencies]
+# ── Cryptography ─────────────────────────────────────────────────────────────
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+argon2           = { version = "0.5",  default-features = false, features = ["alloc", "password-hash"] }
+blake3           = { version = "1.5",  default-features = false, features = ["rayon"] }
+zeroize          = { version = "1.8",  default-features = false, features = ["alloc", "derive"] }
+
+# ── Randomness ───────────────────────────────────────────────────────────────
+rand          = { version = "0.9", default-features = false, features = ["std", "std_rng", "thread_rng"] }
+rand_chacha   = { version = "0.9", default-features = false, features = ["std"] }
+
+# ── Compression ──────────────────────────────────────────────────────────────
+flate2 = { version = "1.0", features = ["zlib"] }
+
+# ── Serialization ────────────────────────────────────────────────────────────
+serde            = { version = "1.0", features = ["derive"] }
+serde_json       = "1.0"
+
+# ── Error handling ───────────────────────────────────────────────────────────
+thiserror = "2.0"
+
+# ── Async / Utility ──────────────────────────────────────────────────────────
+rayon = "1.10"
+
+# ── Optical / QR ─────────────────────────────────────────────────────────────
+qrcode = "0.14"
+image  = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rxing  = "0.8"
+
+# ── Camera / Display ─────────────────────────────────────────────────────────
+nokhwa  = { version = "0.10", features = ["input-native", "output-threaded"] }
+minifb  = "0.28"
+
+# ── CLI ──────────────────────────────────────────────────────────────────────
+clap       = { version = "4", features = ["derive", "env"] }
+rpassword  = "7"
+indicatif  = "0.18"
+
+# ── WASM ─────────────────────────────────────────────────────────────────────
+wasm-bindgen = "0.2.118"
+js-sys       = "0.3"
+getrandom    = { version = "0.3", features = ["wasm_js"] }
+
+# ── Solana ───────────────────────────────────────────────────────────────────
+solana-sdk    = "2"
+
+# ── PBKDF2 / SHA-2 (v1 Python compat) ───────────────────────────────────────
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+sha2   = { version = "0.10", default-features = false }
+
+# ── General utilities ─────────────────────────────────────────────────────────
+base64  = "0.22"
+bincode = "1.3"
+hex     = "0.4"
+
+# ── Internal crates ──────────────────────────────────────────────────────────
+afterimage-core    = { path = "crates/afterimage-core" }
+afterimage-optical = { path = "crates/afterimage-optical" }
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+strip         = "symbols"
+
+[profile.dev]
+opt-level = 1          # faster crypto even in dev

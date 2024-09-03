@@ -1,0 +1,48 @@
+[package]
+name        = "afterimage-core"
+description = "Core cryptographic and fountain-code primitives for AfterImage air-gap protocol"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+keywords.workspace    = true
+categories.workspace  = true
+
+[features]
+default  = ["std", "argon2"]
+std      = ["flate2", "rand/std", "rand_chacha/std"]
+argon2   = ["dep:argon2"]
+# Enable this to build for WASM targets (disables rayon/flate2 std deps)
+wasm     = ["getrandom"]
+
+[dependencies]
+# Cryptography
+chacha20poly1305 = { workspace = true }
+argon2           = { workspace = true, optional = true }
+blake3           = { workspace = true }
+zeroize          = { workspace = true }
+
+# Randomness — fountain code seeded PRNG
+rand        = { workspace = true }
+rand_chacha = { workspace = true }
+
+# Compression
+flate2 = { workspace = true, optional = true }
+
+# v1 Python compat KDF
+pbkdf2 = { workspace = true }
+sha2   = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Serialization
+serde = { workspace = true, optional = true }
+
+# WASM compat
+getrandom = { workspace = true, optional = true }
+
+[dev-dependencies]
+rand  = { workspace = true }
+hex   = "0.4"

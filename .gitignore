@@ -1,0 +1,8 @@
+/target
+Cargo.lock
+*.pdb
+*.orig
+.DS_Store
+.env
+dist/
+pkg/
