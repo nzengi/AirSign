@@ -1,0 +1,36 @@
+[package]
+name        = "afterimage-optical"
+description = "QR-code generation, animated display, and camera scanning for AfterImage"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[features]
+default  = ["display", "camera"]
+display  = ["dep:minifb"]
+camera   = ["dep:nokhwa"]
+
+[dependencies]
+afterimage-core = { workspace = true }
+
+# QR encode
+qrcode = { workspace = true }
+image  = { workspace = true }
+
+# QR decode
+rxing = { workspace = true }
+
+# Window / framebuffer (display side)
+minifb = { workspace = true, optional = true }
+
+# Camera capture (receive side)
+nokhwa = { workspace = true, optional = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Utilities
+serde      = { workspace = true }
+serde_json = { workspace = true }
