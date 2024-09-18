@@ -1,0 +1,27 @@
+[package]
+name        = "afterimage-solana"
+description = "Air-gap Solana transaction signing via AfterImage QR streams (AirSign)"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+keywords     = ["solana", "air-gap", "signing", "hardware-wallet", "qr-code"]
+
+[dependencies]
+afterimage-core    = { workspace = true }
+afterimage-optical = { workspace = true }
+
+solana-sdk = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+base64     = { workspace = true }
+bincode    = { workspace = true }
+hex        = { workspace = true }
+rand       = { workspace = true }
+
+[dev-dependencies]
+solana-sdk = { workspace = true }
+bincode    = { workspace = true }
+base64     = { workspace = true }
