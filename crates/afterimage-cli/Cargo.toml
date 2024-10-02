@@ -1,0 +1,25 @@
+[package]
+name        = "afterimage"
+description = "Air-gap file transfer via animated QR codes — CLI binary"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[[bin]]
+name = "afterimage"
+path = "src/main.rs"
+
+[dependencies]
+afterimage-core    = { workspace = true }
+afterimage-optical = { workspace = true }
+
+clap      = { workspace = true }
+rpassword = { workspace = true }
+indicatif = { workspace = true }
+
+[features]
+default = ["display", "camera"]
+display = ["afterimage-optical/display"]
+camera  = ["afterimage-optical/camera"]
