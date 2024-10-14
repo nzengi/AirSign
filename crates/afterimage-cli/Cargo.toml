@@ -1,6 +1,6 @@
 [package]
-name        = "afterimage"
-description = "Air-gap file transfer via animated QR codes — CLI binary"
+name        = "airsign"
+description = "Air-gapped Solana transaction signing and file transfer via QR codes — CLI"
 version.workspace     = true
 edition.workspace     = true
 authors.workspace     = true
@@ -8,12 +8,13 @@ license.workspace     = true
 repository.workspace  = true
 
 [[bin]]
-name = "afterimage"
+name = "airsign"
 path = "src/main.rs"
 
 [dependencies]
 afterimage-core    = { workspace = true }
 afterimage-optical = { workspace = true }
+afterimage-solana  = { path = "../afterimage-solana" }
 
 clap      = { workspace = true }
 rpassword = { workspace = true }

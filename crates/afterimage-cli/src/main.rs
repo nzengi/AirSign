@@ -16,6 +16,7 @@ use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 
 use afterimage_core::session::{RecvSession, SendSession};
+use afterimage_solana::broadcaster::Broadcaster;
 
 // ─── CLI definition ───────────────────────────────────────────────────────────
 
@@ -74,6 +75,17 @@ enum Commands {
         #[arg(long, default_value = "benchmark")]
         password: String,
     },
+
+    /// Broadcast a signed-transaction file (SignResponse JSON) to a Solana cluster.
+    Broadcast {
+        /// Path to the SignResponse JSON file produced by the air-gapped machine.
+        #[arg(value_name = "RESPONSE_FILE")]
+        response_file: PathBuf,
+
+        /// Solana cluster URL or shorthand: devnet | mainnet | testnet.
+        #[arg(long, default_value = "devnet")]
+        cluster: String,
+    },
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
@@ -96,6 +108,11 @@ fn main() {
         } => cmd_recv(output, camera_index, password),
 
         Commands::Bench { file, password } => cmd_bench(file, password),
+
+        Commands::Broadcast {
+            response_file,
+            cluster,
+        } => cmd_broadcast(response_file, cluster),
     }
 }
 
@@ -264,6 +281,44 @@ fn cmd_bench(file: PathBuf, password: String) {
             recv.progress() * 100.0
         );
         std::process::exit(2);
+    }
+}
+
+// ─── broadcast ────────────────────────────────────────────────────────────────
+
+fn cmd_broadcast(response_file: PathBuf, cluster: String) {
+    let json_bytes = std::fs::read(&response_file).unwrap_or_else(|e| {
+        eprintln!("error: cannot read {:?}: {e}", response_file);
+        std::process::exit(1);
+    });
+
+    let rpc_url = match cluster.as_str() {
+        "devnet"   => afterimage_solana::broadcaster::DEVNET_URL.to_owned(),
+        "testnet"  => afterimage_solana::broadcaster::TESTNET_URL.to_owned(),
+        "mainnet"  => afterimage_solana::broadcaster::MAINNET_URL.to_owned(),
+        custom     => custom.to_owned(),
+    };
+
+    eprintln!("[airsign] broadcasting to {}…", rpc_url);
+
+    let b = Broadcaster::new(&rpc_url);
+
+    match b.broadcast_response_json(&json_bytes) {
+        Ok(sig) => {
+            println!("{sig}");
+            let cluster_param = match cluster.as_str() {
+                "mainnet" => String::new(),
+                other => format!("?cluster={other}"),
+            };
+            eprintln!(
+                "[airsign] ✓ confirmed on {}\nhttps://explorer.solana.com/tx/{sig}{cluster_param}",
+                b.cluster
+            );
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
