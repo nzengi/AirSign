@@ -24,11 +24,13 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, clippy::all)]
 
+pub mod broadcaster;
 pub mod error;
 pub mod request;
 pub mod response;
 pub mod signer;
 
+pub use broadcaster::Broadcaster;
 pub use error::AirSignError;
 pub use request::SignRequest;
 pub use response::SignResponse;

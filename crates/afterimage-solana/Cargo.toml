@@ -12,7 +12,8 @@ keywords     = ["solana", "air-gap", "signing", "hardware-wallet", "qr-code"]
 afterimage-core    = { workspace = true }
 afterimage-optical = { workspace = true }
 
-solana-sdk = { workspace = true }
+solana-sdk    = { workspace = true }
+solana-client = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 thiserror  = { workspace = true }

@@ -28,4 +28,8 @@ pub enum AirSignError {
     /// JSON serialisation / deserialisation error.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// Solana RPC error (broadcast / query failure).
+    #[error("RPC error: {0}")]
+    Rpc(String),
 }

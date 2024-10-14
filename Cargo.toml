@@ -63,6 +63,7 @@ getrandom    = { version = "0.3", features = ["wasm_js"] }
 
 # ── Solana ───────────────────────────────────────────────────────────────────
 solana-sdk    = "2"
+solana-client = "2"
 
 # ── PBKDF2 / SHA-2 (v1 Python compat) ───────────────────────────────────────
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
