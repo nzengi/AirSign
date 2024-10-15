@@ -1,54 +1,65 @@
 # AirSign
 
-Air-gapped transaction signing for Solana using animated QR codes.
+**Air-gapped Solana transaction signing over an encrypted, fountain-coded QR stream.**
 
-The private key never touches an internet-connected machine. AirSign turns any
-camera-equipped laptop into a hardware wallet without requiring USB, Bluetooth,
-or any other data channel.
+No USB. No Bluetooth. No network cable. Only a camera.
 
 ---
 
-## How it works
+## Why AirSign?
 
-```
-Online machine                        Air-gapped machine
-─────────────────                     ──────────────────
-Build transaction
-  │
-  ▼
-Encrypt + fountain-encode
-  │
-  ▼
-Animate as QR stream  ──── camera ──▶  Decode QR stream
-                                         │
-                                         ▼
-                                       Decrypt
-                                         │
-                                         ▼
-                                       Show tx summary
-                                         │
-                                         ▼
-                                       Sign with keypair
-                                         │
-                                         ▼
-Broadcast to Solana  ◀── camera ────  Animate signed tx
-```
+### The problem with existing solutions
 
-The transfer layer uses [fountain codes](https://en.wikipedia.org/wiki/Fountain_code)
-(a rateless erasure code) so dropped or blurry frames are recovered
-automatically — no retransmission protocol needed.
+| Solution | Attack surface |
+|---|---|
+| **Ledger / Trezor** | USB or BLE connection; firmware must be trusted; supply-chain attacks on firmware updates are well documented |
+| **Paper wallet** | Private key must be typed into an online machine to sign — the key is exposed at signing time |
+| **Air-gapped laptop + USB drive** | USB ports are attack vectors (BadUSB, firmware implants); many high-security ops forbid USB entirely |
+| **AirSign** | **Zero electrical connection.** Private key never leaves the air-gapped machine. Only photons cross the gap. |
+
+### Who actually needs this?
+
+- **Validator operators** — sign reward-withdrawal transactions without keeping the withdrawal keypair on an online machine
+- **DAO treasuries** — offline multi-sig approval without flying signers to the same room
+- **Exchanges and custodians** — cold-wallet signing on machines with no USB ports (common in hardened datacentres)
+- **High-value token holders** — anyone who has ever typed a seed phrase into MetaMask and felt uneasy about it
+
+### What makes AirSign different from "QR code hardware wallets" like Keystone?
+
+Keystone and AirSign share the same physical channel (QR codes), but differ in the cryptographic layer:
+
+- **Encrypted channel** — AirSign wraps every QR frame in ChaCha20-Poly1305 authenticated encryption. A camera pointed at the screen from across a room cannot read the transaction.
+- **Fountain coding** — An LT-code fountain encoder means the receiver can reconstruct the data from *any* sufficient subset of frames. Packet loss or a blurry frame does not stall the transfer.
+- **No proprietary firmware** — AirSign is a software library (Rust + WASM). Any machine that can run Rust or a modern browser can be the signer.
 
 ---
 
-## Crates
+## Architecture
 
-| Crate | Description |
-|-------|-------------|
-| `airsign-core` | Protocol, fountain coding, ChaCha20-Poly1305 encryption |
-| `airsign-optical` | QR encode/decode, camera capture (nokhwa), display (minifb) |
-| `airsign-solana` | Solana transaction signing logic |
-| `airsign-wasm` | Browser WebAssembly bindings |
-| `airsign` | CLI binary (`airsign send / recv / sign / bench`) |
+```text
+┌──────────────────────────────────┐       ┌──────────────────────────────────┐
+│        Online machine            │       │       Air-gapped machine         │
+│   (watch-only wallet / dApp)     │       │   (private key, never networked) │
+│                                  │       │                                  │
+│  1. Build unsigned Transaction   │       │                                  │
+│  2. SignRequest { tx, metadata } │       │                                  │
+│  3. Argon2id KDF → session key   │       │  Argon2id KDF → same session key │
+│  4. ChaCha20-Poly1305 encrypt    │       │                                  │
+│  5. LT fountain encode           │       │                                  │
+│  6. Animate QR frames ──────────►│──────►│  7. Camera captures QR stream    │
+│                                  │       │  8. Fountain decode              │
+│                                  │       │  9. Decrypt → SignRequest        │
+│                                  │       │ 10. Ed25519 sign                 │
+│                                  │       │ 11. Encrypt SignResponse          │
+│                                  │       │ 12. Animate QR frames            │
+│ 15. Inject signature(s)   ◄──────│◄──────│◄─── 13. Camera captures stream   │
+│ 16. send_and_confirm_tx          │       │                                  │
+│     → Solana cluster             │       │                                  │
+└──────────────────────────────────┘       └──────────────────────────────────┘
+
+Shared secret: a password known to both operators.
+Private key:   stays inside the right box forever.
+```
 
 ---
 
@@ -56,95 +67,103 @@ automatically — no retransmission protocol needed.
 
 ### Prerequisites
 
-- Rust 1.75+ (nightly recommended for WASM builds)
-- Two machines: one online, one permanently offline
-- A webcam on each machine
+- Rust stable ≥ 1.78
+- A webcam on the online machine (or any camera capable of reading QR codes)
+- Optionally: a second machine with no network connectivity (the air-gapped signer)
 
 ### Build
 
 ```bash
 git clone https://github.com/nzengi/AirSign.git
 cd AirSign
-cargo build --release
+cargo build --release -p airsign          # CLI binary
+cargo build --release -p afterimage-solana  # Solana signing library
 ```
 
-The `airsign` binary ends up at `target/release/airsign`.
-
-### Sign a Solana transaction (air-gapped)
-
-**On the online machine** — build and broadcast the unsigned transaction, then
-stream it to the air-gapped machine:
+For headless / CI (no camera or display):
 
 ```bash
-# Stream an unsigned transaction file as QR codes
-airsign send unsigned_tx.bin --fps 8
+cargo build --release -p airsign --no-default-features
 ```
 
-**On the air-gapped machine** — receive, review, and sign:
+### Sign and broadcast a Solana transaction (full flow)
+
+**Online machine** — prepare the unsigned transaction and start the QR stream:
 
 ```bash
-# Read QR stream from camera, sign, stream response back
-airsign sign --keypair ~/.config/solana/id.json
+# Example: sign a simple SOL transfer on devnet
+# (your dApp or wallet generates the unsigned tx bytes)
+airsign send unsigned_tx.json --fps 8
 ```
 
-**On the online machine** — receive the signed transaction and broadcast:
+**Air-gapped machine** — receive, sign, and transmit back:
 
 ```bash
-airsign recv signed_tx.bin
-# then: solana transaction broadcast signed_tx.bin
+airsign recv sign_request.json --camera-index 0
+# AirSigner loads your keypair from AIRSIGN_KEYPAIR_PATH or prompts
+airsign send sign_response.json --fps 8
 ```
 
-### Benchmark (no hardware needed)
+**Online machine** — receive the signature and broadcast:
 
 ```bash
-cargo run --release -- bench /path/to/file
+airsign recv sign_response.json --camera-index 0
+airsign broadcast sign_response.json --cluster devnet
+# prints: https://explorer.solana.com/tx/<SIGNATURE>?cluster=devnet
 ```
+
+### Offline benchmark (no hardware required)
+
+```bash
+echo "benchmark payload" > test.bin
+airsign bench test.bin
+# [bench] ✓ roundtrip OK in 12 ms (1.4 MB/s)
+```
+
+---
+
+## Crate structure
+
+| Crate | Purpose |
+|---|---|
+| `afterimage-core` | Protocol framing, fountain coding, Argon2id KDF, ChaCha20-Poly1305 encryption |
+| `afterimage-optical` | QR encode/decode, camera capture, display window |
+| `afterimage-solana` | `AirSigner` (Ed25519 signing), `Broadcaster` (RPC submit) |
+| `afterimage-wasm` | WASM bindings for browser-based signers |
+| `airsign` (CLI) | `send`, `recv`, `bench`, `broadcast` subcommands |
 
 ---
 
 ## Security model
 
-- **ChaCha20-Poly1305** authenticated encryption (256-bit key)
-- Key derived via **Argon2id** (memory-hard, 64 MB, 3 iterations)
-- **BLAKE3** content hash verified on receipt before decryption
-- The QR channel is one-way optical; no TCP/IP stack involved
-- Air-gapped machine needs no network drivers loaded at all
+- **The private key never leaves the air-gapped machine.** The only data transmitted online → offline is the unsigned transaction (not sensitive). The only data transmitted offline → online is the Ed25519 signature and signed transaction bytes.
+- **The optical channel is encrypted.** ChaCha20-Poly1305 with a key derived via Argon2id (64 MB, 3 iterations) from a shared password. An observer with a camera recording the QR stream learns nothing without the password.
+- **Replay protection.** Each `SignRequest` contains a random 32-byte nonce. The `AirSigner` rejects any `SignResponse` whose nonce does not match.
+- **No unsafe code.** `#![forbid(unsafe_code)]` is set on all crates.
 
-The password is the only shared secret. Use a strong, random passphrase.
+### Threat model (what AirSign does *not* protect against)
 
----
-
-## Running tests
-
-```bash
-cargo test
-```
-
-All crates include unit tests and integration tests. The `airsign-solana`
-tests run a full sign-request roundtrip against a simulated keypair without
-needing a live cluster.
+- A compromised display driver or OS on the online machine that shows a different transaction than the one the user approved.
+- Physical compromise of the air-gapped machine itself.
+- Password brute-force if the shared secret is weak.
 
 ---
 
-## WASM / browser
+## WASM build
 
 ```bash
 cargo install wasm-pack
-wasm-pack build crates/airsign-wasm --target web --release
+wasm-pack build crates/afterimage-wasm --target web
 ```
 
-The resulting `pkg/` directory can be imported directly into any modern
-JavaScript bundler.
+The generated `pkg/` directory can be imported directly into any JavaScript/TypeScript project.
 
 ---
 
 ## Contributing
 
-Pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for
-conventions. Please open an issue before starting large changes.
-
----
+See [CONTRIBUTING.md](CONTRIBUTING.md). In short: `cargo fmt`, `cargo clippy -- -D warnings`, tests required for new behaviour.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+AGPL-3.0-or-later — see [LICENSE](LICENSE).
