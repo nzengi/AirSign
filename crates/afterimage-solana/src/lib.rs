@@ -26,6 +26,7 @@
 
 pub mod broadcaster;
 pub mod error;
+pub mod keystore;
 pub mod multisig_request;
 pub mod multisig_response;
 pub mod multisigner;
@@ -34,7 +35,8 @@ pub mod response;
 pub mod signer;
 
 pub use broadcaster::Broadcaster;
-pub use error::AirSignError;
+pub use error::{AirSignError, KeyStoreError};
+pub use keystore::KeyStore;
 pub use multisig_request::{MultiSignRequest, PartialSig};
 pub use multisig_response::MultiSignResponse;
 pub use multisigner::{MultiSigner, build_multisig_session, advance_round, advance_round_from};

@@ -14,6 +14,34 @@ Versioning follows [SemVer](https://semver.org/).
 
 ---
 
+## [2.2.0] — 2026-04-17
+
+### Added
+- **OS-native keychain integration** (`afterimage-solana::keystore::KeyStore`) —
+  Ed25519 keypairs can now be stored in and loaded from the platform keychain
+  (macOS Keychain Services, Linux Secret Service / GNOME Keyring, Windows
+  Credential Store) using the `keyring` v3 crate.
+- **`KeyStoreError`** enum in `afterimage_solana::error` — typed errors for
+  `NotFound`, `AlreadyExists`, `InvalidKeyData`, `Backend`, and `Io`.
+- **`KeyStore` API** — `generate`, `store`, `load`, `exists`, `delete`,
+  `import_from_file`, `export_to_file`.
+- **`airsign key` subcommand** with six operations:
+  - `airsign key generate <LABEL> [--overwrite] [--output PATH]`
+  - `airsign key import  <LABEL> --file PATH [--overwrite]`
+  - `airsign key show    <LABEL>`
+  - `airsign key list`   (reads `~/.airsign/keys.json` index)
+  - `airsign key export  <LABEL> --output PATH`
+  - `airsign key delete  <LABEL> [--yes]`
+- **`--keypair keychain:<LABEL>`** support on `airsign sign` — keypair can now
+  be resolved from the OS keychain instead of a plaintext JSON file.
+- `resolve_keypair_bytes()` helper in the CLI — transparently handles both file
+  paths and `keychain:` prefixed specifiers.
+- 7 unit tests covering the full `KeyStore` lifecycle
+  (generate, store/load roundtrip, not-found, exists, delete, duplicate
+  rejection, import/export file roundtrip).
+
+---
+
 ## [2.1.0] — 2026-04-17
 
 ### Added

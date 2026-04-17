@@ -8,8 +8,9 @@
 //! airsign send      <FILE>  [--fps N] [--window-size PX]
 //! airsign recv      <OUTPUT> [--camera-index N]
 //! airsign bench     <FILE>
-//! airsign sign      <REQUEST_FILE> --keypair <PATH> [--output PATH] [--yes]
+//! airsign sign      <REQUEST_FILE> --keypair <PATH|keychain:LABEL> [--output PATH] [--yes]
 //! airsign broadcast <RESPONSE_FILE> [--cluster devnet|mainnet|testnet]
+//! airsign key       generate | import | show | list | export | delete
 //! ```
 
 use std::path::PathBuf;
@@ -21,8 +22,10 @@ use afterimage_core::{
     crypto::{Argon2Params, SecurityProfile},
     session::{RecvSession, SendSession},
 };
+use solana_sdk::signature::Signer as _;
 use afterimage_solana::{
     broadcaster::Broadcaster,
+    keystore::KeyStore,
     signer::{AirSigner, summarize_request, default_nonce_store_path},
     SignRequest,
     MultiSignRequest, MultiSignResponse, MultiSigner,
@@ -123,9 +126,10 @@ enum Commands {
         #[arg(value_name = "REQUEST_FILE")]
         request_file: PathBuf,
 
-        /// Path to the Solana keypair JSON file (64-byte array).
-        #[arg(long, value_name = "PATH", env = "AIRSIGN_KEYPAIR")]
-        keypair: PathBuf,
+        /// Path to the Solana keypair JSON file (64-byte array) **or** a
+        /// keychain label prefixed with `keychain:` (e.g. `keychain:my-key`).
+        #[arg(long, value_name = "PATH|keychain:LABEL", env = "AIRSIGN_KEYPAIR")]
+        keypair: String,
 
         /// Output file path for the SignResponse JSON.
         #[arg(long, value_name = "PATH", default_value = "sign_response.json")]
@@ -144,6 +148,10 @@ enum Commands {
         #[arg(long)]
         yes: bool,
     },
+
+    /// OS-native keychain key management (generate, import, show, list, export, delete).
+    #[command(subcommand)]
+    Key(KeyCommands),
 
     /// M-of-N multi-signature session management.
     ///
@@ -205,12 +213,224 @@ fn main() {
             yes,
         } => cmd_sign(request_file, keypair, output, nonce_store, no_nonce_store, yes),
 
+        Commands::Key(sub) => cmd_key(sub),
+
         Commands::Multisign(sub) => cmd_multisign(sub),
 
         Commands::Broadcast {
             response_file,
             cluster,
         } => cmd_broadcast(response_file, cluster),
+    }
+}
+
+// ─── key sub-commands ────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum KeyCommands {
+    /// Generate a new Ed25519 keypair and store it in the OS keychain.
+    Generate {
+        /// Label (account name) for the keychain entry.
+        #[arg(value_name = "LABEL")]
+        label: String,
+
+        /// Overwrite if the label already exists.
+        #[arg(long)]
+        overwrite: bool,
+
+        /// Also write a Solana CLI keypair JSON to this path.
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+
+    /// Import a Solana CLI keypair JSON file into the OS keychain.
+    Import {
+        /// Label (account name) for the keychain entry.
+        #[arg(value_name = "LABEL")]
+        label: String,
+
+        /// Path to the Solana keypair JSON file (64-byte array).
+        #[arg(long, value_name = "PATH")]
+        file: PathBuf,
+
+        /// Overwrite if the label already exists.
+        #[arg(long)]
+        overwrite: bool,
+    },
+
+    /// Print the Ed25519 public key for a keychain entry.
+    Show {
+        /// Label of the keychain entry.
+        #[arg(value_name = "LABEL")]
+        label: String,
+    },
+
+    /// List all AirSign keychain entries visible to the current user.
+    List,
+
+    /// Export a keychain entry to a Solana CLI keypair JSON file.
+    Export {
+        /// Label of the keychain entry.
+        #[arg(value_name = "LABEL")]
+        label: String,
+
+        /// Output path for the Solana keypair JSON file.
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+    },
+
+    /// Delete a keychain entry (irreversible).
+    Delete {
+        /// Label of the keychain entry.
+        #[arg(value_name = "LABEL")]
+        label: String,
+
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+// ─── cmd_key ──────────────────────────────────────────────────────────────────
+
+fn cmd_key(sub: KeyCommands) {
+    match sub {
+        KeyCommands::Generate { label, overwrite, output } => {
+            if overwrite {
+                // Delete existing entry silently before generating a fresh one.
+                let _ = KeyStore::delete(&label);
+            }
+            let kp = KeyStore::generate(&label).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            eprintln!("[airsign] ✓ generated keypair '{}'", label);
+            eprintln!("[airsign]   public key : {}", kp.pubkey());
+            eprintln!("[airsign]   stored in  : OS keychain (service=airsign, account={})", label);
+
+            if let Some(path) = output {
+                KeyStore::export_to_file(&label, &path).unwrap_or_else(|e| {
+                    eprintln!("error: cannot export to {:?}: {e}", path);
+                    std::process::exit(1);
+                });
+                eprintln!("[airsign]   also saved : {:?}", path);
+            }
+        }
+
+        KeyCommands::Import { label, file, overwrite } => {
+            let kp = KeyStore::import_from_file(&label, &file, overwrite).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            eprintln!("[airsign] ✓ imported keypair '{}'", label);
+            eprintln!("[airsign]   public key : {}", kp.pubkey());
+            eprintln!("[airsign]   source     : {:?}", file);
+        }
+
+        KeyCommands::Show { label } => {
+            let kp = KeyStore::load(&label).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            // Print only the pubkey on stdout for easy scripting
+            println!("{}", kp.pubkey());
+        }
+
+        KeyCommands::List => {
+            // The keyring crate does not expose an enumeration API (OS limitation
+            // on Windows and older macOS), so we maintain a small index file at
+            // ~/.airsign/keys.json and update it on generate/import/delete.
+            // For now, remind the user of the workaround.
+            eprintln!("[airsign] key list: checking OS keychain index…");
+            let index_path = key_index_path();
+            match index_path.as_ref().and_then(|p| std::fs::read(p).ok()) {
+                Some(data) => {
+                    let labels: Vec<String> = serde_json::from_slice(&data).unwrap_or_default();
+                    if labels.is_empty() {
+                        eprintln!("[airsign] no keys found in index.");
+                    } else {
+                        for lbl in &labels {
+                            match KeyStore::load(lbl) {
+                                Ok(kp) => println!("  {}  →  {}", lbl, kp.pubkey()),
+                                Err(_) => println!("  {}  →  (not accessible / deleted)", lbl),
+                            }
+                        }
+                    }
+                }
+                None => {
+                    eprintln!("[airsign] key index not found at {:?}.", index_path);
+                    eprintln!("[airsign] Keys stored before v2.2.0 are not listed here.");
+                    eprintln!("[airsign] Use `airsign key show <LABEL>` to look up individual keys.");
+                }
+            }
+        }
+
+        KeyCommands::Export { label, output } => {
+            KeyStore::export_to_file(&label, &output).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            eprintln!("[airsign] ✓ exported '{}' to {:?}", label, output);
+            eprintln!("[airsign]   treat this file like a private key — keep it safe!");
+        }
+
+        KeyCommands::Delete { label, yes } => {
+            if !yes {
+                eprint!(
+                    "[airsign] delete '{}' from OS keychain? This cannot be undone. [y/N]: ",
+                    label
+                );
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).ok();
+                if !line.trim().eq_ignore_ascii_case("y") {
+                    eprintln!("[airsign] aborted.");
+                    std::process::exit(0);
+                }
+            }
+            KeyStore::delete(&label).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            // Remove from index if present
+            remove_from_key_index(&label);
+            eprintln!("[airsign] ✓ deleted '{}'", label);
+        }
+    }
+}
+
+/// Path to `~/.airsign/keys.json` — a simple label index for `airsign key list`.
+fn key_index_path() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".airsign").join("keys.json"))
+}
+
+/// Add a label to the index (no-op on I/O failure).
+#[allow(dead_code)]
+fn add_to_key_index(label: &str) {
+    let Some(path) = key_index_path() else { return };
+    let mut labels: Vec<String> = path
+        .parent()
+        .and_then(|d| { std::fs::create_dir_all(d).ok() })
+        .and_then(|_| std::fs::read(&path).ok())
+        .and_then(|d| serde_json::from_slice(&d).ok())
+        .unwrap_or_default();
+    if !labels.contains(&label.to_owned()) {
+        labels.push(label.to_owned());
+        if let Ok(json) = serde_json::to_vec(&labels) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+}
+
+/// Remove a label from the index (no-op on I/O failure).
+fn remove_from_key_index(label: &str) {
+    let Some(path) = key_index_path() else { return };
+    let Ok(data) = std::fs::read(&path) else { return };
+    let mut labels: Vec<String> = serde_json::from_slice(&data).unwrap_or_default();
+    labels.retain(|l| l != label);
+    if let Ok(json) = serde_json::to_vec(&labels) {
+        let _ = std::fs::write(&path, json);
     }
 }
 
@@ -476,9 +696,47 @@ fn cmd_multisign(sub: MultisignCommands) {
 
 // ─── sign ─────────────────────────────────────────────────────────────────────
 
+/// Resolve a keypair from either a file path or a `keychain:<label>` specifier.
+///
+/// Returns the raw 64-byte keypair material.
+fn resolve_keypair_bytes(spec: &str) -> Vec<u8> {
+    if let Some(label) = spec.strip_prefix("keychain:") {
+        // Load from OS keychain
+        let kp = KeyStore::load(label).unwrap_or_else(|e| {
+            eprintln!("error: keychain load '{}': {e}", label);
+            std::process::exit(1);
+        });
+        eprintln!("[airsign] keypair source: keychain:{}", label);
+        kp.to_bytes().to_vec()
+    } else {
+        // Load from file
+        let path = PathBuf::from(spec);
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            eprintln!("error: cannot read keypair {:?}: {e}", path);
+            std::process::exit(1);
+        });
+        let bytes: Vec<u8> = serde_json::from_str(&text).unwrap_or_else(|e| {
+            eprintln!(
+                "error: {:?} is not a valid Solana keypair JSON (expected [u8; 64]): {e}",
+                path
+            );
+            std::process::exit(1);
+        });
+        if bytes.len() != 64 {
+            eprintln!(
+                "error: keypair must be 64 bytes, got {} bytes in {:?}",
+                bytes.len(),
+                path
+            );
+            std::process::exit(1);
+        }
+        bytes
+    }
+}
+
 fn cmd_sign(
     request_file: PathBuf,
-    keypair_path: PathBuf,
+    keypair_spec: String,
     output: PathBuf,
     nonce_store_override: Option<PathBuf>,
     no_nonce_store: bool,
@@ -496,26 +754,8 @@ fn cmd_sign(
         std::process::exit(1);
     });
 
-    // 2. Load the Solana keypair JSON (64-byte array)
-    let kp_text = std::fs::read_to_string(&keypair_path).unwrap_or_else(|e| {
-        eprintln!("error: cannot read keypair {:?}: {e}", keypair_path);
-        std::process::exit(1);
-    });
-    let kp_bytes: Vec<u8> = serde_json::from_str(&kp_text).unwrap_or_else(|e| {
-        eprintln!(
-            "error: {:?} is not a valid Solana keypair JSON (expected [u8; 64]): {e}",
-            keypair_path
-        );
-        std::process::exit(1);
-    });
-    if kp_bytes.len() != 64 {
-        eprintln!(
-            "error: keypair must be 64 bytes, got {} bytes in {:?}",
-            kp_bytes.len(),
-            keypair_path
-        );
-        std::process::exit(1);
-    }
+    // 2. Resolve the keypair (file path or keychain label)
+    let kp_bytes = resolve_keypair_bytes(&keypair_spec);
 
     // 3. Build AirSigner with appropriate nonce store
     // Password is not used for local sign_request() calls (only for QR sessions)

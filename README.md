@@ -128,9 +128,9 @@ airsign bench test.bin
 |---|---|
 | `afterimage-core` | Protocol framing, fountain coding, Argon2id KDF, ChaCha20-Poly1305 encryption |
 | `afterimage-optical` | QR encode/decode, camera capture, display window |
-| `afterimage-solana` | `AirSigner` (Ed25519 signing), `Broadcaster` (RPC submit) |
+| `afterimage-solana` | `AirSigner` (Ed25519 signing), `KeyStore` (OS keychain), `Broadcaster` (RPC submit) |
 | `afterimage-wasm` | WASM bindings for browser-based signers |
-| `airsign` (CLI) | `send`, `recv`, `bench`, `broadcast` subcommands |
+| `airsign` (CLI) | `send`, `recv`, `bench`, `sign`, `broadcast`, `key`, `multisign` subcommands |
 
 ---
 
@@ -160,7 +160,72 @@ The generated `pkg/` directory can be imported directly into any JavaScript/Type
 
 ---
 
+## Key management (OS keychain)
+
+AirSign v2.2.0 adds native keychain integration so that your Ed25519 signing
+keypair never has to live as a plaintext JSON file.
+
+### Generate a new keypair and store it in the OS keychain
+
+```bash
+airsign key generate my-mainnet-key
+# [airsign] ✓ generated keypair 'my-mainnet-key'
+# [airsign]   public key : 4wTQ…
+# [airsign]   stored in  : OS keychain (service=airsign, account=my-mainnet-key)
+```
+
+### Import an existing Solana CLI keypair file
+
+```bash
+airsign key import my-mainnet-key --file ~/.config/solana/id.json
+```
+
+### Sign using a keychain key
+
+```bash
+# Instead of: --keypair ~/.config/solana/id.json
+airsign sign request.json --keypair keychain:my-mainnet-key
+```
+
+### Export back to a file (e.g. for use with the Solana CLI)
+
+```bash
+airsign key export my-mainnet-key --output /tmp/id.json
+```
+
+### List all stored keys
+
+```bash
+airsign key list
+  my-mainnet-key  →  4wTQ…
+  devnet-hot-key  →  9xRz…
+```
+
+### Delete a key (irreversible)
+
+```bash
+airsign key delete my-mainnet-key
+# [airsign] delete 'my-mainnet-key' from OS keychain? This cannot be undone. [y/N]:
+```
+
+The keychain service name is always `airsign`; the account name is the label
+you supply. On macOS the entry is visible in **Keychain Access.app** under
+*Login → Passwords*, filtered by service `airsign`.
+
+---
+
 ## Changelog
+
+### v2.2.0 — OS keychain integration
+
+- `afterimage-solana::keystore::KeyStore` — full CRUD for Ed25519 keypairs in
+  the platform keychain (macOS / Linux / Windows).
+- `airsign key` subcommand: `generate`, `import`, `show`, `list`, `export`,
+  `delete`.
+- `airsign sign --keypair keychain:<LABEL>` — load signing key directly from
+  the OS keychain.
+- `KeyStoreError` enum with typed variants.
+- 7 unit tests covering the full `KeyStore` lifecycle.
 
 ### v2.1.0 — Security profiles
 

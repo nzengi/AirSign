@@ -2,6 +2,30 @@
 
 use thiserror::Error;
 
+/// Errors produced by [`crate::keystore::KeyStore`].
+#[derive(Debug, Error)]
+pub enum KeyStoreError {
+    /// No entry found for the given label.
+    #[error("key not found: '{0}'")]
+    NotFound(String),
+
+    /// An entry with this label already exists.
+    #[error("key already exists: '{0}' (use --overwrite to replace)")]
+    AlreadyExists(String),
+
+    /// The stored bytes are not a valid Ed25519 keypair.
+    #[error("invalid key data: {0}")]
+    InvalidKeyData(String),
+
+    /// OS keychain backend error.
+    #[error("keychain backend error: {0}")]
+    Backend(String),
+
+    /// File I/O error during import/export.
+    #[error("I/O error: {0}")]
+    Io(String),
+}
+
 /// Errors produced by the AirSign Solana integration.
 #[derive(Debug, Error)]
 pub enum AirSignError {
