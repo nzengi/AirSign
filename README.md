@@ -122,6 +122,73 @@ airsign bench test.bin
 
 ---
 
+## Packages
+
+### React SDK — `@airsign/react`
+
+A batteries-included TypeScript/React package for building air-gapped Solana
+signing UIs in the browser.  Wraps the AfterImage WASM module with ergonomic
+hooks and ready-to-use components.
+
+```bash
+npm install @airsign/react qrcode jsqr
+```
+
+**Bootstrap** (once, before rendering):
+
+```ts
+import { initAirSign } from "@airsign/react";
+await initAirSign(); // loads the WASM bundle
+```
+
+**Send side** — animate a QR stream from an unsigned transaction:
+
+```tsx
+import { QrAnimator } from "@airsign/react";
+
+<QrAnimator
+  data={unsignedTxBytes}
+  filename="unsigned_tx.bin"
+  password="shared-secret"
+  fps={8}
+  onComplete={() => setStep("waiting_for_signature")}
+/>
+```
+
+**Receive side** — scan the signed response back:
+
+```tsx
+import { QrScanner } from "@airsign/react";
+
+<QrScanner
+  password="shared-secret"
+  onComplete={(data, filename) => broadcastTransaction(data)}
+  onProgress={(p) => setProgress(p)}
+/>
+```
+
+**Transaction review** — show a human-readable summary with risk flags:
+
+```tsx
+import { TransactionReview } from "@airsign/react";
+
+<TransactionReview summary={inspectorOutput} showFields />
+```
+
+**Hooks** — use directly for custom UIs:
+
+```ts
+import { useSendSession, useRecvSession } from "@airsign/react";
+
+const { start, stop, reset, progress, frameIndex, isDone } =
+  useSendSession({ data, password, fps: 8 });
+
+const { ingest, progress, isComplete, error } =
+  useRecvSession({ password, onComplete: (buf) => broadcast(buf) });
+```
+
+---
+
 ## Crate structure
 
 | Crate | Purpose |

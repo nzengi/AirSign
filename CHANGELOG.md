@@ -11,6 +11,36 @@ Versioning follows [SemVer](https://semver.org/).
 
 ### Added
 
+- **`@airsign/react` — React SDK package** (`packages/react`)
+  - `src/types.ts` — full TypeScript interface definitions: `AirSignWasm`,
+    `WasmSendSession`, `WasmRecvSession`, `SendSessionState`, `RecvSessionState`,
+    `TransactionSummary`, `RiskFlag`, `InstructionInfo`, and all component prop types.
+  - `src/initAirSign.ts` — `initAirSign(wasmUrl?)` initialises the WASM module once
+    and caches it on `globalThis.__airsign_wasm__`.  Also exports `isAirSignReady()`
+    and `getAirSignWasm()` helpers.  Uses a string-expression dynamic import so the
+    package builds cleanly before `wasm-pack` has been run.
+  - `src/hooks/useSendSession.ts` — `useSendSession` hook drives the QR animation
+    loop: creates a `WasmSendSession`, ticks frames at the requested FPS via
+    `setInterval`, exposes `start / stop / reset`, and fires `onProgress` /
+    `onComplete` callbacks.
+  - `src/hooks/useRecvSession.ts` — `useRecvSession` hook manages the receive
+    pipeline: `ingest(frame)` feeds raw bytes into `WasmRecvSession.ingest_frame()`,
+    tracks progress, and calls `onComplete(data, filename)` exactly once on success.
+  - `src/components/QrAnimator.tsx` — animated QR canvas component; wraps
+    `useSendSession`, draws each frame with `qrcode`, exposes an imperative
+    `QrAnimatorHandle` (start / stop / reset) via `forwardRef`, shows a progress
+    bar and status text.
+  - `src/components/QrScanner.tsx` — camera capture component; opens
+    `getUserMedia`, decodes QR frames with `jsqr` (lazy-loaded), feeds bytes into
+    `useRecvSession`, renders a progress bar and "Scan again" reset button.
+  - `src/components/TransactionReview.tsx` — read-only transaction summary UI;
+    renders risk flags (colour-coded HIGH / MEDIUM / LOW badges) and a per-instruction
+    list with optional field expansion.
+  - `src/index.ts` — public API barrel re-exporting all hooks, components, and types.
+  - Build: `tsup` produces ESM + CJS + `.d.ts` bundles (25 KB JS, 10 KB types).
+  - Tests: 19 Vitest unit tests covering both hooks with a stub WASM session;
+    all 19 pass under `jsdom`.
+
 - **Watch-only Wallet & Transaction Builder** (`afterimage-solana`, `airsign prepare`)
   - `crates/afterimage-solana/src/wallet.rs` — `WatchWallet` (public-key-only,
     never touches private key material) with `balance()`, `recent_blockhash()`,
