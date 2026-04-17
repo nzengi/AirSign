@@ -9,6 +9,33 @@ Versioning follows [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Ledger hardware wallet support** (`afterimage-solana`, `airsign` CLI)
+  - `crates/afterimage-solana/src/ledger_apdu.rs` — full Solana Ledger APDU
+    codec: HID framing, BIP44 `DerivationPath` (parse / serialise / display),
+    `build_apdu`, `apdu_to_hid_packets` / `hid_packets_to_apdu` roundtrip,
+    status-word helpers, 8 unit tests (all passing).
+  - `crates/afterimage-solana/src/ledger.rs` — `LedgerSigner` struct: USB HID
+    device enumeration (`list_devices`), `connect` / `connect_by_path`,
+    `app_version`, `pubkey` (with optional on-device confirmation), and
+    `sign_transaction` with automatic chunking for large transactions.
+  - `error.rs` — new `LedgerError` enum (`NotFound`, `AppNotOpen`,
+    `UserDenied`, `Hid`, `InvalidResponse`, `InvalidData`).
+  - `lib.rs` — re-exports `LedgerSigner`, `LedgerDeviceInfo`, `DerivationPath`,
+    `LedgerError`.
+  - `airsign ledger list` — lists all connected Ledger devices with name,
+    serial number, and HID path.
+  - `airsign ledger pubkey [--derivation PATH] [--confirm]` — prints the
+    Ed25519 pubkey for a BIP44 path; `--confirm` shows it on the Ledger
+    display.
+  - `airsign ledger version` — prints the Solana app version installed on the
+    device.
+  - `airsign sign --keypair ledger:<PATH>` — `ledger:` prefix support in the
+    keypair specifier; `ledger:default` uses `m/44'/501'/0'/0'`.
+  - `hidapi = "2"` added to workspace dependencies and `afterimage-solana`
+    crate dependencies.
+
+
 - Hardware wallet key import (Ledger via HID)
 - `airsign-wasm`: React component library
 

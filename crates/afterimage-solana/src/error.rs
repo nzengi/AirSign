@@ -26,6 +26,34 @@ pub enum KeyStoreError {
     Io(String),
 }
 
+/// Errors produced by [`crate::ledger::LedgerSigner`].
+#[derive(Debug, Error)]
+pub enum LedgerError {
+    /// No Ledger device found via USB HID.
+    #[error("no Ledger device found — connect a Ledger and open the Solana app")]
+    NotFound,
+
+    /// The Solana app is not open on the device (or the wrong app is open).
+    #[error("Solana app not open on Ledger — unlock the device and open the Solana app")]
+    AppNotOpen,
+
+    /// The user rejected the action on the Ledger display.
+    #[error("action rejected on Ledger device")]
+    UserDenied,
+
+    /// HID transport error (underlying `hidapi` error).
+    #[error("HID transport error: {0}")]
+    Hid(String),
+
+    /// The device returned an unexpected or malformed response.
+    #[error("invalid Ledger response: {0}")]
+    InvalidResponse(String),
+
+    /// The caller supplied invalid data (e.g. empty transaction bytes).
+    #[error("invalid data: {0}")]
+    InvalidData(String),
+}
+
 /// Errors produced by the AirSign Solana integration.
 #[derive(Debug, Error)]
 pub enum AirSignError {

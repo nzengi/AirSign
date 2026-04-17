@@ -128,9 +128,9 @@ airsign bench test.bin
 |---|---|
 | `afterimage-core` | Protocol framing, fountain coding, Argon2id KDF, ChaCha20-Poly1305 encryption |
 | `afterimage-optical` | QR encode/decode, camera capture, display window |
-| `afterimage-solana` | `AirSigner` (Ed25519 signing), `KeyStore` (OS keychain), `Broadcaster` (RPC submit) |
+| `afterimage-solana` | `AirSigner` (Ed25519 signing), `KeyStore` (OS keychain), `LedgerSigner` (HID), `Broadcaster` (RPC submit) |
 | `afterimage-wasm` | WASM bindings for browser-based signers |
-| `airsign` (CLI) | `send`, `recv`, `bench`, `sign`, `broadcast`, `key`, `multisign` subcommands |
+| `airsign` (CLI) | `send`, `recv`, `bench`, `sign`, `broadcast`, `key`, `ledger`, `multisign` subcommands |
 
 ---
 
@@ -157,6 +157,63 @@ wasm-pack build crates/afterimage-wasm --target web
 ```
 
 The generated `pkg/` directory can be imported directly into any JavaScript/TypeScript project.
+
+---
+
+## Ledger hardware wallet
+
+AirSign supports Ledger devices (Nano S, Nano X, Nano S+, Stax, Flex) as an
+alternative signing backend.  The device communicates over USB HID — no
+proprietary Ledger Live software is required.
+
+### Prerequisites
+
+1. Connect the Ledger via USB.
+2. Unlock the device with your PIN.
+3. Open the **Solana** app on the device.
+4. On Linux, add a udev rule so the device is accessible without `sudo`:
+   ```text
+   SUBSYSTEM=="usb", ATTRS{idVendor}=="2c97", MODE="0660", GROUP="plugdev"
+   ```
+
+### List connected devices
+
+```bash
+airsign ledger list
+# [airsign] 1 Ledger device(s) found:
+#   [0] Nano X  serial=abc123  path=/dev/hidraw2
+```
+
+### Show the Solana app version
+
+```bash
+airsign ledger version
+# Solana app v1.4.0
+```
+
+### Get the public key for a derivation path
+
+```bash
+# Default BIP44 path: m/44'/501'/0'/0'
+airsign ledger pubkey
+
+# Custom path with on-device confirmation
+airsign ledger pubkey --derivation "m/44'/501'/1'/0'" --confirm
+# [airsign] please approve on the Ledger display…
+# Hx3k…
+```
+
+### Sign a transaction with a Ledger
+
+Use the `ledger:` prefix in `--keypair`.  The default path
+(`m/44'/501'/0'/0'`) is used when you write `ledger:default`.
+
+```bash
+airsign sign request.json --keypair "ledger:m/44'/501'/0'/0'"
+# [airsign] Ledger: Nano X (pid=0x0004, serial=abc123)
+# [airsign] please approve on the Ledger display…
+# [airsign] ✓ signed — response written to sign_response.json
+```
 
 ---
 

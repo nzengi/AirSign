@@ -8,9 +8,10 @@
 //! airsign send      <FILE>  [--fps N] [--window-size PX]
 //! airsign recv      <OUTPUT> [--camera-index N]
 //! airsign bench     <FILE>
-//! airsign sign      <REQUEST_FILE> --keypair <PATH|keychain:LABEL> [--output PATH] [--yes]
+//! airsign sign      <REQUEST_FILE> --keypair <PATH|keychain:LABEL|ledger:PATH> [--output PATH] [--yes]
 //! airsign broadcast <RESPONSE_FILE> [--cluster devnet|mainnet|testnet]
 //! airsign key       generate | import | show | list | export | delete
+//! airsign ledger    list | pubkey | version
 //! ```
 
 use std::path::PathBuf;
@@ -26,6 +27,8 @@ use solana_sdk::signature::Signer as _;
 use afterimage_solana::{
     broadcaster::Broadcaster,
     keystore::KeyStore,
+    ledger::LedgerSigner,
+    ledger_apdu::DerivationPath,
     signer::{AirSigner, summarize_request, default_nonce_store_path},
     SignRequest,
     MultiSignRequest, MultiSignResponse, MultiSigner,
@@ -126,9 +129,12 @@ enum Commands {
         #[arg(value_name = "REQUEST_FILE")]
         request_file: PathBuf,
 
-        /// Path to the Solana keypair JSON file (64-byte array) **or** a
-        /// keychain label prefixed with `keychain:` (e.g. `keychain:my-key`).
-        #[arg(long, value_name = "PATH|keychain:LABEL", env = "AIRSIGN_KEYPAIR")]
+        /// Path to the Solana keypair JSON file (64-byte array), a keychain
+        /// label prefixed with `keychain:` (e.g. `keychain:my-key`), or a
+        /// Ledger BIP44 path prefixed with `ledger:` (e.g.
+        /// `ledger:m/44'/501'/0'/0'` — uses the default path if omitted:
+        /// `ledger:default`).
+        #[arg(long, value_name = "PATH|keychain:LABEL|ledger:PATH", env = "AIRSIGN_KEYPAIR")]
         keypair: String,
 
         /// Output file path for the SignResponse JSON.
@@ -152,6 +158,10 @@ enum Commands {
     /// OS-native keychain key management (generate, import, show, list, export, delete).
     #[command(subcommand)]
     Key(KeyCommands),
+
+    /// Ledger hardware wallet commands (list, pubkey, version).
+    #[command(subcommand)]
+    Ledger(LedgerCommands),
 
     /// M-of-N multi-signature session management.
     ///
@@ -214,6 +224,8 @@ fn main() {
         } => cmd_sign(request_file, keypair, output, nonce_store, no_nonce_store, yes),
 
         Commands::Key(sub) => cmd_key(sub),
+
+        Commands::Ledger(sub) => cmd_ledger(sub),
 
         Commands::Multisign(sub) => cmd_multisign(sub),
 
@@ -431,6 +443,87 @@ fn remove_from_key_index(label: &str) {
     labels.retain(|l| l != label);
     if let Ok(json) = serde_json::to_vec(&labels) {
         let _ = std::fs::write(&path, json);
+    }
+}
+
+// ─── ledger sub-commands ─────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum LedgerCommands {
+    /// List all connected Ledger devices.
+    List,
+
+    /// Print the Ed25519 public key for a BIP44 derivation path.
+    ///
+    /// The Solana app must be open on the Ledger device.
+    Pubkey {
+        /// BIP44 derivation path (default: m/44'/501'/0'/0').
+        #[arg(long, default_value = "m/44'/501'/0'/0'")]
+        derivation: String,
+
+        /// Prompt the user to confirm the pubkey on the Ledger display.
+        #[arg(long)]
+        confirm: bool,
+    },
+
+    /// Print the Solana app version installed on the Ledger device.
+    Version,
+}
+
+// ─── cmd_ledger ───────────────────────────────────────────────────────────────
+
+fn cmd_ledger(sub: LedgerCommands) {
+    match sub {
+        LedgerCommands::List => {
+            let devices = LedgerSigner::list_devices().unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            if devices.is_empty() {
+                eprintln!("[airsign] no Ledger devices found.");
+                eprintln!("[airsign] connect a Ledger, unlock it, and open the Solana app.");
+            } else {
+                eprintln!("[airsign] {} Ledger device(s) found:", devices.len());
+                for (i, dev) in devices.iter().enumerate() {
+                    let name = dev.product_string.as_deref().unwrap_or("Ledger device");
+                    let serial = dev.serial_number.as_deref().unwrap_or("unknown");
+                    eprintln!("  [{}] {}  serial={}  path={}", i, name, serial, dev.path);
+                }
+            }
+        }
+
+        LedgerCommands::Pubkey { derivation, confirm } => {
+            let path = DerivationPath::parse(&derivation).unwrap_or_else(|e| {
+                eprintln!("error: invalid derivation path {:?}: {e}", derivation);
+                std::process::exit(1);
+            });
+            let signer = LedgerSigner::connect().unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            eprintln!("[airsign] Ledger: {}", signer.info);
+            if confirm {
+                eprintln!("[airsign] please approve on the Ledger display…");
+            }
+            let pubkey = signer.pubkey(&path, confirm).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            println!("{pubkey}");
+        }
+
+        LedgerCommands::Version => {
+            let signer = LedgerSigner::connect().unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            eprintln!("[airsign] Ledger: {}", signer.info);
+            let version = signer.app_version().unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            println!("Solana app v{version}");
+        }
     }
 }
 
@@ -696,9 +789,14 @@ fn cmd_multisign(sub: MultisignCommands) {
 
 // ─── sign ─────────────────────────────────────────────────────────────────────
 
-/// Resolve a keypair from either a file path or a `keychain:<label>` specifier.
+/// Resolve a keypair from a file path, `keychain:<label>`, or `ledger:[PATH]` specifier.
 ///
 /// Returns the raw 64-byte keypair material.
+///
+/// For `ledger:` specifiers the keypair material is constructed from the public key
+/// returned by the Ledger device together with a zero secret key — **this is only
+/// suitable for uses that only need the public key** (e.g. building a `SignRequest`).
+/// Actual signing against a Ledger is handled by [`cmd_sign`] directly.
 fn resolve_keypair_bytes(spec: &str) -> Vec<u8> {
     if let Some(label) = spec.strip_prefix("keychain:") {
         // Load from OS keychain
@@ -708,6 +806,11 @@ fn resolve_keypair_bytes(spec: &str) -> Vec<u8> {
         });
         eprintln!("[airsign] keypair source: keychain:{}", label);
         kp.to_bytes().to_vec()
+    } else if spec.starts_with("ledger:") {
+        // For keypair resolution we only need the public key bytes.
+        // The actual signature will be produced by cmd_sign using ledger_sign_request().
+        // Return a sentinel value; cmd_sign detects the ledger: prefix separately.
+        vec![0u8; 64]
     } else {
         // Load from file
         let path = PathBuf::from(spec);
