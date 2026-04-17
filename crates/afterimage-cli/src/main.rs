@@ -18,7 +18,7 @@ use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 
 use afterimage_core::{
-    crypto::Argon2Params,
+    crypto::{Argon2Params, SecurityProfile},
     session::{RecvSession, SendSession},
 };
 use afterimage_solana::{
@@ -61,6 +61,17 @@ enum Commands {
         /// Password (prompted securely if omitted).
         #[arg(long, env = "AFTERIMAGE_PASSWORD")]
         password: Option<String>,
+
+        /// Named security preset: owasp-2024 | mainnet | paranoid.
+        ///
+        /// Selects pre-tuned Argon2id parameters:
+        ///   owasp-2024  — 64 MiB / t=3  (OWASP 2024 minimum, default)
+        ///   mainnet     — 256 MiB / t=4  (recommended for mainnet-beta)
+        ///   paranoid    — 512 MiB / t=5  (maximum practical hardening)
+        ///
+        /// Cannot be combined with --argon2-mem / --argon2-iter.
+        #[arg(long, value_name = "PROFILE", conflicts_with_all = &["argon2_mem", "argon2_iter"])]
+        security_profile: Option<String>,
 
         /// Argon2id memory cost in KiB (default: 65536 = 64 MiB, OWASP 2024 minimum).
         /// Higher values are slower but harder to brute-force.
@@ -172,9 +183,10 @@ fn main() {
             fps,
             window_size,
             password,
+            security_profile,
             argon2_mem,
             argon2_iter,
-        } => cmd_send(file, fps, window_size, password, argon2_mem, argon2_iter),
+        } => cmd_send(file, fps, window_size, password, security_profile, argon2_mem, argon2_iter),
 
         Commands::Recv {
             output,
@@ -582,6 +594,7 @@ fn cmd_send(
     fps: u32,
     window_size: usize,
     password: Option<String>,
+    security_profile: Option<String>,
     argon2_mem: u32,
     argon2_iter: u32,
 ) {
@@ -597,13 +610,41 @@ fn cmd_send(
         .and_then(|n| n.to_str())
         .unwrap_or("data.bin");
 
-    // Build Argon2 params — always emit a v3 frame so the receiver can
-    // reconstruct the key with the correct parameters automatically.
-    let argon2_params = Argon2Params {
-        m_cost: argon2_mem,
-        t_cost: argon2_iter,
-        p_cost: afterimage_core::crypto::ARGON2_P_COST,
+    // Resolve Argon2 params — preset takes priority over manual flags.
+    let argon2_params = if let Some(ref profile_str) = security_profile {
+        let profile = SecurityProfile::from_str(profile_str).unwrap_or_else(|| {
+            eprintln!(
+                "error: unknown --security-profile {:?}. \
+                 Valid values: owasp-2024, mainnet, paranoid",
+                profile_str
+            );
+            std::process::exit(1);
+        });
+        eprintln!("[airsign] security profile: {} ({})", profile.name(), profile.description());
+        profile.to_params()
+    } else {
+        let params = Argon2Params {
+            m_cost: argon2_mem,
+            t_cost: argon2_iter,
+            p_cost: afterimage_core::crypto::ARGON2_P_COST,
+        };
+        eprintln!(
+            "[airsign] security profile: custom (m={} KiB = {} MiB, t={}, p={})",
+            params.m_cost,
+            params.m_cost / 1024,
+            params.t_cost,
+            params.p_cost,
+        );
+        params
     };
+
+    // Warn if below mainnet minimum
+    if !argon2_params.meets_mainnet_minimum() {
+        eprintln!(
+            "[airsign] ⚠  params below mainnet minimum (256 MiB / t=4). \
+             Use --security-profile mainnet for mainnet-beta transactions."
+        );
+    }
 
     let mut session =
         SendSession::new_with_argon2_params(&data, filename, &password, argon2_params)
@@ -617,9 +658,10 @@ fn cmd_send(
 
     eprintln!(
         "[afterimage] send: {} bytes | ~{} droplets recommended | {fps} fps | \
-         argon2 m={argon2_mem} KiB t={argon2_iter}",
+         security: {}",
         data.len(),
-        recommended
+        recommended,
+        argon2_params.security_level(),
     );
 
     #[cfg(feature = "display")]

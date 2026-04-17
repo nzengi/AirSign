@@ -10,8 +10,37 @@ Versioning follows [SemVer](https://semver.org/).
 ## [Unreleased]
 
 - Hardware wallet key import (Ledger via HID)
-- `airsign-solana`: multi-signature support (m-of-n)
 - `airsign-wasm`: React component library
+
+---
+
+## [2.1.0] — 2026-04-17
+
+### Added
+- **`SecurityProfile` enum** (`owasp-2024` / `mainnet` / `paranoid`) in
+  `afterimage-core::crypto` — named Argon2id presets with hardened parameters
+  for mainnet-beta and extreme-value signing sessions.
+- **`--security-profile <PROFILE>`** CLI flag on `airsign send` — selects a
+  preset and is mutually exclusive with `--argon2-mem` / `--argon2-iter`.
+- `Argon2Params::meets_mainnet_minimum()` — returns `true` when params satisfy
+  the mainnet recommendation (m ≥ 256 MiB, t ≥ 4).
+- `Argon2Params::security_level()` — human-readable label (`"weak"`,
+  `"owasp-2024"`, `"mainnet"`, `"paranoid"`).
+- `SecurityProfile::from_str()` — case-insensitive parser accepting aliases
+  (`"mainnet-beta"`, `"max"`, `"owasp2024"`, …).
+- Named constants `ARGON2_M_COST_MAINNET`, `ARGON2_T_COST_MAINNET`,
+  `ARGON2_M_COST_PARANOID`, `ARGON2_T_COST_PARANOID`.
+- `airsign send` now prints the active security profile and emits a warning
+  when params are below the mainnet minimum.
+- 7 new unit tests covering all preset permutations and edge cases.
+
+### Fixed
+- `MetadataFrame::from_bytes` now checks frame length **before** magic bytes,
+  ensuring callers always receive `MetadataTooShort` instead of `InvalidMagic`
+  when a short slice is passed.
+- `session::send_recv_v3_custom_argon2_params` test corrected to use
+  `p_cost: ARGON2_P_COST` — `p_cost` is not stored in the v3 wire frame and
+  the receiver always reconstructs it from the published constant.
 
 ---
 

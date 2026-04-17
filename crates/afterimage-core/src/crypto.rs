@@ -49,14 +49,32 @@ pub const TAG_LEN: usize = 16;
 /// Minimum blob length: salt + nonce + tag (zero-length plaintext).
 pub const MIN_BLOB_LEN: usize = SALT_LEN + NONCE_LEN + TAG_LEN;
 
-// ─── Argon2id default parameters (OWASP 2024 minimum) ────────────────────────
+// ─── Argon2id parameter constants ─────────────────────────────────────────────
 
-/// Default memory cost in KiB — 64 MiB.
+/// Default (OWASP 2024 minimum) memory cost in KiB — 64 MiB.
 pub const ARGON2_M_COST: u32 = 65_536;
-/// Default time (iteration) cost.
+/// Default (OWASP 2024 minimum) time (iteration) cost.
 pub const ARGON2_T_COST: u32 = 3;
 /// Default degree of parallelism.
 pub const ARGON2_P_COST: u32 = 4;
+
+/// Mainnet-recommended memory cost in KiB — 256 MiB.
+///
+/// Using this parameter makes offline dictionary attacks ~4× harder than the
+/// OWASP 2024 minimum.  Recommended for any session that signs mainnet-beta
+/// transactions or holds high-value assets.
+pub const ARGON2_M_COST_MAINNET: u32 = 262_144;
+/// Mainnet-recommended time (iteration) cost.
+pub const ARGON2_T_COST_MAINNET: u32 = 4;
+
+/// Paranoid-level memory cost in KiB — 512 MiB.
+///
+/// Suitable for extremely high-value signing sessions where the operator can
+/// afford a ~4-second KDF latency.  Provides ~8× the brute-force resistance of
+/// the OWASP 2024 minimum.
+pub const ARGON2_M_COST_PARANOID: u32 = 524_288;
+/// Paranoid-level time (iteration) cost.
+pub const ARGON2_T_COST_PARANOID: u32 = 5;
 
 // ─── PBKDF2 parameters (v1 / Python-compat) ──────────────────────────────────
 
@@ -95,6 +113,119 @@ impl Default for Argon2Params {
             t_cost: ARGON2_T_COST,
             p_cost: ARGON2_P_COST,
         }
+    }
+}
+
+impl Argon2Params {
+    /// Returns `true` if the parameters meet the mainnet minimum security level
+    /// (m ≥ 256 MiB **and** t ≥ 4).
+    ///
+    /// Use this to warn operators who are about to sign mainnet transactions with
+    /// sub-optimal KDF settings.
+    pub fn meets_mainnet_minimum(&self) -> bool {
+        self.m_cost >= ARGON2_M_COST_MAINNET && self.t_cost >= ARGON2_T_COST_MAINNET
+    }
+
+    /// Return a human-readable security-level label for these parameters.
+    ///
+    /// | Label        | Condition                                         |
+    /// |---|---|
+    /// | `"paranoid"` | m ≥ 512 MiB **and** t ≥ 5                        |
+    /// | `"mainnet"`  | m ≥ 256 MiB **and** t ≥ 4                        |
+    /// | `"owasp-2024"` | m ≥ 64 MiB **and** t ≥ 3 (OWASP 2024 minimum) |
+    /// | `"weak"`     | below OWASP 2024 minimum                          |
+    pub fn security_level(&self) -> &'static str {
+        if self.m_cost >= ARGON2_M_COST_PARANOID && self.t_cost >= ARGON2_T_COST_PARANOID {
+            "paranoid"
+        } else if self.m_cost >= ARGON2_M_COST_MAINNET && self.t_cost >= ARGON2_T_COST_MAINNET {
+            "mainnet"
+        } else if self.m_cost >= ARGON2_M_COST && self.t_cost >= ARGON2_T_COST {
+            "owasp-2024"
+        } else {
+            "weak"
+        }
+    }
+}
+
+// ─── Security presets ─────────────────────────────────────────────────────────
+
+/// Named Argon2id security preset.
+///
+/// Each variant maps to a concrete [`Argon2Params`] value. Use
+/// [`SecurityProfile::to_params`] to resolve the preset, and the `--security-profile`
+/// CLI flag to select it from the command line.
+///
+/// | Profile    | Memory   | Iterations | Use case                            |
+/// |---|---|---|---|
+/// | `Owasp2024`| 64 MiB   | t=3        | Low-value devnet / testnet sessions |
+/// | `Mainnet`  | 256 MiB  | t=4        | Mainnet transactions (recommended)  |
+/// | `Paranoid` | 512 MiB  | t=5        | Extreme-value, latency-tolerant ops |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecurityProfile {
+    /// OWASP 2024 minimum — 64 MiB, t=3, p=4. Default for all sessions.
+    Owasp2024,
+    /// Mainnet-recommended — 256 MiB, t=4, p=4.
+    Mainnet,
+    /// Maximum practical hardening — 512 MiB, t=5, p=4.
+    Paranoid,
+}
+
+impl SecurityProfile {
+    /// Resolve the preset to concrete [`Argon2Params`].
+    pub fn to_params(self) -> Argon2Params {
+        match self {
+            SecurityProfile::Owasp2024 => Argon2Params {
+                m_cost: ARGON2_M_COST,
+                t_cost: ARGON2_T_COST,
+                p_cost: ARGON2_P_COST,
+            },
+            SecurityProfile::Mainnet => Argon2Params {
+                m_cost: ARGON2_M_COST_MAINNET,
+                t_cost: ARGON2_T_COST_MAINNET,
+                p_cost: ARGON2_P_COST,
+            },
+            SecurityProfile::Paranoid => Argon2Params {
+                m_cost: ARGON2_M_COST_PARANOID,
+                t_cost: ARGON2_T_COST_PARANOID,
+                p_cost: ARGON2_P_COST,
+            },
+        }
+    }
+
+    /// Human-readable one-line description of the preset.
+    pub fn description(self) -> &'static str {
+        match self {
+            SecurityProfile::Owasp2024 => "OWASP 2024 minimum (m=64 MiB, t=3, p=4)",
+            SecurityProfile::Mainnet   => "mainnet-recommended (m=256 MiB, t=4, p=4)",
+            SecurityProfile::Paranoid  => "paranoid (m=512 MiB, t=5, p=4)",
+        }
+    }
+
+    /// Short lowercase name — mirrors the `--security-profile` CLI argument value.
+    pub fn name(self) -> &'static str {
+        match self {
+            SecurityProfile::Owasp2024 => "owasp-2024",
+            SecurityProfile::Mainnet   => "mainnet",
+            SecurityProfile::Paranoid  => "paranoid",
+        }
+    }
+
+    /// Parse from a lowercase string (`"owasp-2024"`, `"mainnet"`, `"paranoid"`).
+    ///
+    /// Returns `None` for unrecognised strings.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "owasp-2024" | "owasp2024" | "default" => Some(SecurityProfile::Owasp2024),
+            "mainnet"    | "mainnet-beta"            => Some(SecurityProfile::Mainnet),
+            "paranoid"   | "max"                     => Some(SecurityProfile::Paranoid),
+            _ => None,
+        }
+    }
+}
+
+impl core::fmt::Display for SecurityProfile {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.description())
     }
 }
 
@@ -463,5 +594,85 @@ mod tests {
         let compressed = compress::compress(PLAINTEXT);
         let recovered = compress::decompress(&compressed).unwrap();
         assert_eq!(recovered, PLAINTEXT);
+    }
+
+    // ── SecurityProfile tests ─────────────────────────────────────────────
+
+    #[test]
+    fn preset_owasp2024_matches_defaults() {
+        let p = SecurityProfile::Owasp2024.to_params();
+        assert_eq!(p, Argon2Params::default());
+        assert_eq!(p.m_cost, ARGON2_M_COST);
+        assert_eq!(p.t_cost, ARGON2_T_COST);
+        assert_eq!(p.p_cost, ARGON2_P_COST);
+    }
+
+    #[test]
+    fn preset_mainnet_params_correct() {
+        let p = SecurityProfile::Mainnet.to_params();
+        assert_eq!(p.m_cost, ARGON2_M_COST_MAINNET);
+        assert_eq!(p.t_cost, ARGON2_T_COST_MAINNET);
+        assert_eq!(p.p_cost, ARGON2_P_COST);
+        assert_eq!(p.m_cost, 262_144, "mainnet must be 256 MiB");
+        assert_eq!(p.t_cost, 4);
+    }
+
+    #[test]
+    fn preset_paranoid_params_correct() {
+        let p = SecurityProfile::Paranoid.to_params();
+        assert_eq!(p.m_cost, ARGON2_M_COST_PARANOID);
+        assert_eq!(p.t_cost, ARGON2_T_COST_PARANOID);
+        assert_eq!(p.m_cost, 524_288, "paranoid must be 512 MiB");
+        assert_eq!(p.t_cost, 5);
+    }
+
+    #[test]
+    fn meets_mainnet_minimum_correct() {
+        assert!(!Argon2Params::default().meets_mainnet_minimum(),
+            "owasp-2024 default must NOT meet mainnet minimum");
+        assert!(SecurityProfile::Mainnet.to_params().meets_mainnet_minimum(),
+            "mainnet preset must meet mainnet minimum");
+        assert!(SecurityProfile::Paranoid.to_params().meets_mainnet_minimum(),
+            "paranoid preset must also meet mainnet minimum");
+        // Edge case: exactly at boundary
+        let edge = Argon2Params { m_cost: ARGON2_M_COST_MAINNET, t_cost: ARGON2_T_COST_MAINNET, p_cost: 4 };
+        assert!(edge.meets_mainnet_minimum());
+        // Just below boundary
+        let below = Argon2Params { m_cost: ARGON2_M_COST_MAINNET - 1, t_cost: ARGON2_T_COST_MAINNET, p_cost: 4 };
+        assert!(!below.meets_mainnet_minimum());
+    }
+
+    #[test]
+    fn security_level_labels_correct() {
+        assert_eq!(Argon2Params::default().security_level(), "owasp-2024");
+        assert_eq!(SecurityProfile::Mainnet.to_params().security_level(), "mainnet");
+        assert_eq!(SecurityProfile::Paranoid.to_params().security_level(), "paranoid");
+        let weak = Argon2Params { m_cost: 8_192, t_cost: 1, p_cost: 1 };
+        assert_eq!(weak.security_level(), "weak");
+    }
+
+    #[test]
+    fn from_str_parses_all_variants() {
+        assert_eq!(SecurityProfile::from_str("owasp-2024"), Some(SecurityProfile::Owasp2024));
+        assert_eq!(SecurityProfile::from_str("owasp2024"),  Some(SecurityProfile::Owasp2024));
+        assert_eq!(SecurityProfile::from_str("default"),    Some(SecurityProfile::Owasp2024));
+        assert_eq!(SecurityProfile::from_str("mainnet"),    Some(SecurityProfile::Mainnet));
+        assert_eq!(SecurityProfile::from_str("mainnet-beta"), Some(SecurityProfile::Mainnet));
+        assert_eq!(SecurityProfile::from_str("paranoid"),   Some(SecurityProfile::Paranoid));
+        assert_eq!(SecurityProfile::from_str("max"),        Some(SecurityProfile::Paranoid));
+        assert_eq!(SecurityProfile::from_str("MAINNET"),    Some(SecurityProfile::Mainnet),
+            "from_str must be case-insensitive");
+        assert_eq!(SecurityProfile::from_str("unknown"),    None);
+        assert_eq!(SecurityProfile::from_str(""),           None);
+    }
+
+    #[test]
+    fn profile_names_and_display() {
+        assert_eq!(SecurityProfile::Owasp2024.name(), "owasp-2024");
+        assert_eq!(SecurityProfile::Mainnet.name(),   "mainnet");
+        assert_eq!(SecurityProfile::Paranoid.name(),  "paranoid");
+        // Display must not panic and must contain the memory size
+        let s = format!("{}", SecurityProfile::Mainnet);
+        assert!(s.contains("256"), "Display must mention 256 MiB: {s}");
     }
 }

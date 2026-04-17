@@ -137,7 +137,7 @@ airsign bench test.bin
 ## Security model
 
 - **The private key never leaves the air-gapped machine.** The only data transmitted online → offline is the unsigned transaction (not sensitive). The only data transmitted offline → online is the Ed25519 signature and signed transaction bytes.
-- **The optical channel is encrypted.** ChaCha20-Poly1305 with a key derived via Argon2id (64 MB, 3 iterations) from a shared password. An observer with a camera recording the QR stream learns nothing without the password.
+- **The optical channel is encrypted.** ChaCha20-Poly1305 with a key derived via Argon2id from a shared password. An observer with a camera recording the QR stream learns nothing without the password.
 - **Replay protection.** Each `SignRequest` contains a random 32-byte nonce. The `AirSigner` rejects any `SignResponse` whose nonce does not match.
 - **No unsafe code.** `#![forbid(unsafe_code)]` is set on all crates.
 
@@ -161,6 +161,33 @@ The generated `pkg/` directory can be imported directly into any JavaScript/Type
 ---
 
 ## Changelog
+
+### v2.1.0 — Security profiles
+
+- **`SecurityProfile` enum** (`owasp-2024` / `mainnet` / `paranoid`) with
+  pre-tuned Argon2id parameters for every threat level.
+- **`--security-profile <PROFILE>`** CLI flag on `airsign send` — mutually
+  exclusive with `--argon2-mem` / `--argon2-iter`.
+- `airsign send` now prints the active profile and warns when params are below
+  the mainnet minimum (256 MiB / t=4).
+- `Argon2Params::meets_mainnet_minimum()` and `security_level()` helpers.
+
+```bash
+# OWASP 2024 minimum (default — 64 MiB / t=3)
+airsign send unsigned_tx.json --fps 8
+
+# Recommended for mainnet-beta (256 MiB / t=4)
+airsign send unsigned_tx.json --fps 8 --security-profile mainnet
+
+# Maximum hardening (512 MiB / t=5)
+airsign send unsigned_tx.json --fps 8 --security-profile paranoid
+```
+
+| Profile | Memory | Iterations | Use case |
+|---|---|---|---|
+| `owasp-2024` | 64 MiB | t=3 | Devnet / testnet (default) |
+| `mainnet` | 256 MiB | t=4 | Mainnet-beta transactions |
+| `paranoid` | 512 MiB | t=5 | Extreme-value signing |
 
 ### v2.0.0 — Protocol v3 + Configurable Argon2id
 

@@ -141,8 +141,10 @@ impl MetadataFrame {
     /// - [`ProtocolError::UnknownVersion`]   — version not 1, 2, or 3
     /// - [`ProtocolError::InvalidFilename`]  — filename bytes not valid UTF-8
     pub fn from_bytes(frame: &[u8]) -> Result<Self, ProtocolError> {
-        // Need at least 5 bytes to identify magic + version
-        if frame.len() < 5 {
+        // A valid METADATA frame must be at least META_SIZE_V2 (77) bytes.
+        // Check length before magic so callers always get MetadataTooShort
+        // when the slice is too short, regardless of its byte content.
+        if frame.len() < META_SIZE_V2 {
             return Err(ProtocolError::MetadataTooShort {
                 min: META_SIZE_V2,
                 got: frame.len(),

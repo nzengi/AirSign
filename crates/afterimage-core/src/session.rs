@@ -359,10 +359,20 @@ mod tests {
     }
 
     /// v3 session: custom Argon2 params embedded in frame, recovered automatically.
+    ///
+    /// Note: p_cost is NOT stored in the v3 wire frame — the receiver always
+    /// reconstructs with ARGON2_P_COST (4). The test must therefore use the
+    /// default parallelism so that sender and receiver derive the same key.
     #[test]
     fn send_recv_v3_custom_argon2_params() {
         let data = make_data(1024);
-        let params = Argon2Params { m_cost: 8_192, t_cost: 1, p_cost: 1 };
+        // Use m_cost=8192 / t_cost=1 for test-speed, but p_cost MUST be the
+        // default (4) since p_cost is not carried in the wire frame.
+        let params = Argon2Params {
+            m_cost: 8_192,
+            t_cost: 1,
+            p_cost: crate::crypto::ARGON2_P_COST,
+        };
 
         let mut send =
             SendSession::new_with_argon2_params(&data, "v3test.bin", PASSWORD, params).unwrap();
