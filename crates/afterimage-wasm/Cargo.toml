@@ -12,7 +12,8 @@ keywords     = ["wasm", "air-gap", "qr-code", "browser"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-afterimage-core = { workspace = true }
+afterimage-core  = { workspace = true }
+afterimage-frost = { workspace = true }
 
 wasm-bindgen  = { workspace = true }
 js-sys        = { workspace = true }

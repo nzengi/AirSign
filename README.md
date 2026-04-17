@@ -16,6 +16,7 @@ AirSign lets you sign Solana transactions on a device that has *never* touched t
 - [Quick Start](#quick-start)
 - [Protocol](#protocol)
 - [M-of-N Multisig](#m-of-n-multisig)
+- [FROST Threshold Signatures](#frost-threshold-signatures)
 - [Ledger Hardware Wallet](#ledger-hardware-wallet)
 - [Cryptography](#cryptography)
 - [CI & Testing](#ci--testing)
@@ -262,6 +263,107 @@ Threshold met (2/3) → PartialSignatures output
 ```
 
 Carol's key is never contacted. The session nonce prevents an attacker from replaying a valid response from a previous session.
+
+---
+
+## FROST Threshold Signatures
+
+AirSign v2.0 adds native support for **FROST** (Flexible Round-Optimized Schnorr Threshold Signatures, [RFC 9591](https://www.rfc-editor.org/rfc/rfc9591)) over Ed25519 — the same curve used by Solana.
+
+### Why FROST vs. sequential multisig
+
+| Property | AirSign Sequential Multisig | FROST |
+|---|---|---|
+| On-chain signature size | M × 64 bytes | **64 bytes** (single sig) |
+| On-chain program required | No (native Ed25519 multisig) | **No** |
+| Private key ever assembled | Never | **Never** |
+| Signing rounds | M sequential rounds | **2 rounds (parallel)** |
+| Nonce replay protection | Session nonce | **Built-in (FROST spec)** |
+| Threshold enforcement | Coordinator enforces | **Cryptographic guarantee** |
+
+The resulting FROST signature is **indistinguishable from a regular Ed25519 signature** — it can be placed into a Solana transaction's signature field and broadcast directly, with no on-chain program changes.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│              DEALER (one-time, trusted)          │
+│  generate_setup(n, t) → N key shares + pubkey   │
+│  Each share transmitted to participant via QR   │
+└──────────────┬──────────────────────────────────┘
+               │  key_package[i]    pubkey_package
+               ▼                         │
+┌──────────────────────┐   ┌─────────────▼──────────────┐
+│   PARTICIPANT i      │   │       AGGREGATOR            │
+│  round1_commit()     │──▶│  add_commitment(r1_i)       │
+│    → nonces (priv)   │   │  build_signing_package(msg) │
+│    → commitment (pub)│   └──────────┬─────────────────┘
+│                      │◀────────────┘ signing_package
+│  round2_sign(nonces, │
+│    signing_pkg)      │──▶ aggregator.add_share(r2_i)
+│    → share (pub)     │
+└──────────────────────┘
+                            aggregator.aggregate()
+                            → final Ed25519 signature ✓
+```
+
+### Crate: `afterimage-frost`
+
+```rust
+use afterimage_frost::{dealer, participant, aggregator};
+
+// 1. Trusted dealer generates key shares
+let setup = dealer::generate_setup(3, 2)?;  // 2-of-3
+
+// 2. Round 1 — each participant commits
+let r1_1 = participant::round1_commit(&setup.key_packages[0], 1)?;
+let r1_2 = participant::round1_commit(&setup.key_packages[1], 2)?;
+
+// 3. Aggregator builds signing package
+let pkg = aggregator::build_signing_package(&[r1_1.clone(), r1_2.clone()], b"tx bytes")?;
+
+// 4. Round 2 — participants sign
+let r2_1 = participant::round2_sign(&setup.key_packages[0], &r1_1.nonces_json, &pkg, 1)?;
+let r2_2 = participant::round2_sign(&setup.key_packages[1], &r1_2.nonces_json, &pkg, 2)?;
+
+// 5. Aggregate → final sig
+let result = aggregator::aggregate(&pkg, &[r2_1, r2_2], &setup.pubkey_package, 2, 3)?;
+println!("sig: {}", result.signature_hex);  // 128 hex chars = 64-byte Ed25519 sig
+```
+
+### WASM API (browser / `@airsign/react`)
+
+```ts
+// Step 1 — dealer
+const dealer = WasmFrostDealer.generate(3, 2);
+const setup  = JSON.parse(dealer.setup_json());
+
+// Step 2 — Round 1
+const p1 = new WasmFrostParticipant(setup.key_packages[0], 1);
+const r1  = JSON.parse(p1.round1());
+
+// Step 3 — aggregator
+const agg = new WasmFrostAggregator(setup.pubkey_package, 2, 3);
+agg.add_commitment(JSON.stringify(r1));
+const pkg = agg.build_signing_package(hexEncode("transfer 1 SOL"));
+
+// Step 4 — Round 2
+const r2 = JSON.parse(p1.round2(r1.nonces_json, pkg));
+
+// Step 5 — aggregate
+agg.add_share(JSON.stringify(r2));
+const result = JSON.parse(agg.aggregate(pkg));
+// result.signature_hex — ready to insert into Solana transaction
+```
+
+The **❄️ FROST Threshold** tab in the signer-web app (`apps/signer-web`) provides a guided, step-by-step in-browser demo of the full flow.
+
+### Security notes
+
+- **Threshold enforcement is cryptographic** — fewer than `t` honest participants cannot produce a valid signature, regardless of what the aggregator claims.
+- **Nonces are ephemeral** — each Round-1 call generates fresh nonces from OS randomness; nonce reuse is impossible through the API.
+- **The aggregator is untrusted** — it never sees private key material; it only combines public commitments and public shares.
+- **`t = 1` is rejected** — `frost-ed25519` requires `min_signers ≥ 2`; the crate validates this before calling the library.
 
 ---
 

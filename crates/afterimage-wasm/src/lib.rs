@@ -638,6 +638,296 @@ impl WasmMultiSignOrchestrator {
     }
 }
 
+// ─── FROST WASM bindings ──────────────────────────────────────────────────────
+
+use afterimage_frost::{aggregator, dealer, participant, Round1Output, Round2Output};
+
+/// Trusted-dealer key-generation for FROST t-of-n signing.
+///
+/// ```js
+/// const d = WasmFrostDealer.generate(3, 2);  // 3 signers, threshold 2
+/// const setup = JSON.parse(d.setup_json());
+/// // setup.key_packages[i] → JSON KeyPackage for participant i+1
+/// // setup.pubkey_package  → JSON PublicKeyPackage (shared)
+/// ```
+#[wasm_bindgen]
+pub struct WasmFrostDealer {
+    setup_json: String,
+}
+
+#[wasm_bindgen]
+impl WasmFrostDealer {
+    /// Generate a fresh t-of-n FROST key setup.
+    ///
+    /// # Errors
+    /// Throws if `threshold == 0`, `threshold > n`, or entropy is unavailable.
+    pub fn generate(n: u16, threshold: u16) -> Result<WasmFrostDealer, JsValue> {
+        let setup = dealer::generate_setup(n, threshold)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let json = serde_json::to_string(&setup)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        Ok(Self { setup_json: json })
+    }
+
+    /// Returns the full `FrostSetup` as a JSON string.
+    ///
+    /// Deserialise with `JSON.parse` in JS.  Contains:
+    /// - `n`, `threshold`
+    /// - `key_packages[]` — one per participant (KEEP PRIVATE, distribute securely)
+    /// - `pubkey_package` — share with all participants and the aggregator
+    pub fn setup_json(&self) -> String {
+        self.setup_json.clone()
+    }
+
+    /// Returns only the `key_packages` array as a JSON string.
+    ///
+    /// `key_packages[i]` is for participant `i+1` (1-indexed).
+    ///
+    /// # Errors
+    /// Throws if the internal JSON is malformed (should never happen).
+    pub fn key_packages_json(&self) -> Result<String, JsValue> {
+        let v: serde_json::Value = serde_json::from_str(&self.setup_json)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        serde_json::to_string(&v["key_packages"])
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns the `pubkey_package` JSON string.
+    ///
+    /// # Errors
+    /// Throws if the internal JSON is malformed (should never happen).
+    pub fn pubkey_package_json(&self) -> Result<String, JsValue> {
+        let v: serde_json::Value = serde_json::from_str(&self.setup_json)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        serde_json::to_string(&v["pubkey_package"])
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// FROST participant — holds a key share and executes Round 1 and Round 2.
+///
+/// ```js
+/// const p = new WasmFrostParticipant(keyPackageJson, 1);
+/// const r1 = JSON.parse(p.round1());
+/// // r1.nonces_json      — keep private!
+/// // r1.commitments_json — send to aggregator
+/// const r2 = JSON.parse(p.round2(noncesJson, signingPackageJson));
+/// // r2.share_json — send to aggregator
+/// ```
+#[wasm_bindgen]
+pub struct WasmFrostParticipant {
+    key_package_json: String,
+    identifier: u16,
+}
+
+#[wasm_bindgen]
+impl WasmFrostParticipant {
+    /// Create a participant from its `KeyPackage` JSON and 1-indexed identifier.
+    #[wasm_bindgen(constructor)]
+    pub fn new(key_package_json: &str, identifier: u16) -> WasmFrostParticipant {
+        Self {
+            key_package_json: key_package_json.to_owned(),
+            identifier,
+        }
+    }
+
+    /// Round 1 — generate nonces and commitment.
+    ///
+    /// Returns a JSON string `{ identifier, nonces_json, commitments_json }`.
+    ///
+    /// - **Keep `nonces_json` private** — it must not leave this participant.
+    /// - Send `commitments_json` to the aggregator.
+    ///
+    /// # Errors
+    /// Throws if the key package JSON is invalid or entropy is unavailable.
+    pub fn round1(&self) -> Result<String, JsValue> {
+        let out = participant::round1_commit(&self.key_package_json, self.identifier)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        serde_json::to_string(&out).map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Round 2 — sign the aggregator's signing package.
+    ///
+    /// - `nonces_json`          — the `nonces_json` field from your Round-1 output.
+    /// - `signing_package_json` — the `SigningPackage` JSON from the aggregator.
+    ///
+    /// Returns a JSON string `{ identifier, share_json }`.
+    /// Send `share_json` to the aggregator.
+    ///
+    /// # Errors
+    /// Throws if any JSON is invalid or the cryptographic check fails.
+    pub fn round2(
+        &self,
+        nonces_json: &str,
+        signing_package_json: &str,
+    ) -> Result<String, JsValue> {
+        let out = participant::round2_sign(
+            &self.key_package_json,
+            nonces_json,
+            signing_package_json,
+            self.identifier,
+        )
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        serde_json::to_string(&out).map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Returns this participant's 1-indexed identifier.
+    pub fn identifier(&self) -> u16 {
+        self.identifier
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// FROST aggregator — coordinates the two rounds and produces the final signature.
+///
+/// The aggregator is **not trusted** with any private key material.
+///
+/// ```js
+/// const agg = new WasmFrostAggregator(pubkeyPackageJson, 2, 3);
+///
+/// // After each participant submits their Round-1 commitment JSON:
+/// agg.add_commitment(r1OutputJson_1);
+/// agg.add_commitment(r1OutputJson_2);
+///
+/// // Build the signing package (message = Solana tx message bytes as hex)
+/// const pkgJson = agg.build_signing_package(messageHex);
+///
+/// // After each participant submits their Round-2 share JSON:
+/// agg.add_share(r2OutputJson_1);
+/// agg.add_share(r2OutputJson_2);
+///
+/// // Aggregate → final Ed25519 signature
+/// const result = JSON.parse(agg.aggregate());
+/// // result.signature_hex     — 64-byte Ed25519 sig (128 hex chars)
+/// // result.verifying_key_hex — 32-byte group public key (64 hex chars)
+/// ```
+#[wasm_bindgen]
+pub struct WasmFrostAggregator {
+    pubkey_package_json: String,
+    threshold: u16,
+    total_participants: u16,
+    commitments: Vec<Round1Output>,
+    shares: Vec<Round2Output>,
+}
+
+#[wasm_bindgen]
+impl WasmFrostAggregator {
+    /// Create an aggregator.
+    ///
+    /// - `pubkey_package_json` — from `WasmFrostDealer.pubkey_package_json()`
+    /// - `threshold`           — M (minimum signers required)
+    /// - `total_participants`  — N (total signers in the setup)
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        pubkey_package_json: &str,
+        threshold: u16,
+        total_participants: u16,
+    ) -> WasmFrostAggregator {
+        Self {
+            pubkey_package_json: pubkey_package_json.to_owned(),
+            threshold,
+            total_participants,
+            commitments: Vec::new(),
+            shares: Vec::new(),
+        }
+    }
+
+    // ─── Round 1 ──────────────────────────────────────────────────────────────
+
+    /// Ingest one participant's Round-1 output JSON.
+    ///
+    /// `r1_json` is the full JSON string returned by `WasmFrostParticipant.round1()`.
+    ///
+    /// # Errors
+    /// Throws if the JSON is malformed.
+    pub fn add_commitment(&mut self, r1_json: &str) -> Result<(), JsValue> {
+        let out: Round1Output =
+            serde_json::from_str(r1_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.commitments.push(out);
+        Ok(())
+    }
+
+    /// Number of Round-1 commitments collected so far.
+    pub fn commitment_count(&self) -> usize {
+        self.commitments.len()
+    }
+
+    /// Build the `SigningPackage` once enough commitments have been collected.
+    ///
+    /// - `message_hex` — the message bytes as a lowercase hex string
+    ///   (for Solana: the serialised `Message` bytes, NOT the full `Transaction`).
+    ///
+    /// Returns the JSON-serialised `SigningPackage` to broadcast to all signers.
+    ///
+    /// # Errors
+    /// Throws if `message_hex` is not valid hex or commitment JSON is malformed.
+    pub fn build_signing_package(&self, message_hex: &str) -> Result<String, JsValue> {
+        let msg = hex::decode(message_hex)
+            .map_err(|e| JsValue::from_str(&format!("hex decode: {e}")))?;
+        aggregator::build_signing_package(&self.commitments, &msg)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    // ─── Round 2 ──────────────────────────────────────────────────────────────
+
+    /// Ingest one participant's Round-2 output JSON.
+    ///
+    /// `r2_json` is the full JSON string returned by `WasmFrostParticipant.round2()`.
+    ///
+    /// # Errors
+    /// Throws if the JSON is malformed.
+    pub fn add_share(&mut self, r2_json: &str) -> Result<(), JsValue> {
+        let out: Round2Output =
+            serde_json::from_str(r2_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.shares.push(out);
+        Ok(())
+    }
+
+    /// Number of Round-2 shares collected so far.
+    pub fn share_count(&self) -> usize {
+        self.shares.len()
+    }
+
+    // ─── Aggregate ────────────────────────────────────────────────────────────
+
+    /// Aggregate all Round-2 shares into a single Ed25519 signature.
+    ///
+    /// Returns a JSON string matching [`FrostResult`]:
+    /// ```json
+    /// {
+    ///   "signature_hex":     "...",  // 128 hex chars = 64 bytes
+    ///   "verifying_key_hex": "...",  // 64 hex chars  = 32 bytes
+    ///   "message_hex":       "...",
+    ///   "threshold":         2,
+    ///   "total_participants":3
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    /// Throws if the cryptographic aggregation fails (e.g. invalid shares or
+    /// wrong public-key package) or JSON serialisation fails.
+    pub fn aggregate(&self, signing_package_json: &str) -> Result<String, JsValue> {
+        let result = aggregator::aggregate(
+            signing_package_json,
+            &self.shares,
+            &self.pubkey_package_json,
+            self.threshold,
+            self.total_participants,
+        )
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        serde_json::to_string(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Reset state for a new signing session (keeps the key setup).
+    pub fn reset(&mut self) {
+        self.commitments.clear();
+        self.shares.clear();
+    }
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 /// Minimal Base58 encoder (Bitcoin/Solana alphabet).

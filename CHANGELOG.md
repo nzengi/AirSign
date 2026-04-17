@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.0.0] — 2026-04-17
+
+### Added
+- **`crates/afterimage-frost`** — new Rust crate implementing FROST RFC 9591 threshold signatures over Ed25519
+  - `dealer` — trusted-dealer key generation (`t-of-n`, requires `t ≥ 2`)
+  - `participant` — Round 1 (commit) and Round 2 (sign) logic
+  - `aggregator` — signing-package builder and share combiner
+  - 19 unit tests covering full roundtrips (2-of-2, 2-of-3, 3-of-5), invalid configs, nonce uniqueness, and share mismatch detection
+- **`crates/afterimage-wasm`** — FROST WebAssembly bindings
+  - `WasmFrostDealer.generate(n, t)` → `FrostSetup` JSON
+  - `WasmFrostParticipant(keyPackageJson, id)` → `round1()`, `round2(nonces, signingPkg)`
+  - `WasmFrostAggregator(pubkeyPkg, t, n)` → `add_commitment()`, `build_signing_package()`, `add_share()`, `aggregate()`
+- **`apps/signer-web` — tab 5 "❄️ FROST Threshold"**
+  - `FrostPage.tsx` — guided 5-step in-browser FROST session demo
+  - Step progress indicator, private/public data distinction, copy buttons, reset flow
+
+
 All notable changes to AirSign are documented here.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
