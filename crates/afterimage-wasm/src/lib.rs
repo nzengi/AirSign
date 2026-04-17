@@ -293,3 +293,377 @@ pub fn encode_hex(data: &[u8]) -> String {
 pub fn decode_hex(s: &str) -> Result<Vec<u8>, JsValue> {
     hex::decode(s).map_err(|e| JsValue::from_str(&format!("hex decode error: {}", e)))
 }
+
+// ─── WasmKeypair ─────────────────────────────────────────────────────────────
+
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+
+/// An Ed25519 keypair usable from JavaScript/TypeScript.
+///
+/// ```js
+/// const kp = WasmKeypair.generate();
+/// const sig = kp.sign(msgBytes);             // Uint8Array(64)
+/// WasmKeypair.verify(kp.pubkey(), msgBytes, sig); // true
+/// ```
+#[wasm_bindgen]
+pub struct WasmKeypair {
+    inner: SigningKey,
+}
+
+#[wasm_bindgen]
+impl WasmKeypair {
+    /// Generate a fresh random Ed25519 keypair using the OS CSPRNG.
+    ///
+    /// # Errors
+    /// Throws if the platform entropy source is unavailable.
+    pub fn generate() -> Result<WasmKeypair, JsValue> {
+        let mut seed = [0u8; 32];
+        getrandom::fill(&mut seed)
+            .map_err(|e| JsValue::from_str(&format!("getrandom error: {}", e)))?;
+        Ok(Self {
+            inner: SigningKey::from_bytes(&seed),
+        })
+    }
+
+    /// Derive a keypair deterministically from a 32-byte seed.
+    ///
+    /// # Errors
+    /// Throws if `seed` is not exactly 32 bytes.
+    pub fn from_seed(seed: &[u8]) -> Result<WasmKeypair, JsValue> {
+        let arr: [u8; 32] = seed
+            .try_into()
+            .map_err(|_| JsValue::from_str("seed must be exactly 32 bytes"))?;
+        Ok(Self {
+            inner: SigningKey::from_bytes(&arr),
+        })
+    }
+
+    /// Returns the 32-byte compressed public key.
+    pub fn pubkey(&self) -> Vec<u8> {
+        self.inner.verifying_key().to_bytes().to_vec()
+    }
+
+    /// Returns the public key as a Base58-encoded string (Solana-compatible).
+    pub fn pubkey_b58(&self) -> String {
+        bs58_encode(self.inner.verifying_key().as_bytes())
+    }
+
+    /// Returns the 64-byte raw secret seed || public key (Solana keypair format).
+    ///
+    /// Handle with care — this exports the private key material.
+    pub fn secret_bytes(&self) -> Vec<u8> {
+        self.inner.to_keypair_bytes().to_vec()
+    }
+
+    /// Sign `message` with Ed25519.  Returns a 64-byte signature.
+    pub fn sign(&self, message: &[u8]) -> Vec<u8> {
+        self.inner.sign(message).to_bytes().to_vec()
+    }
+
+    /// Verify an Ed25519 `signature` over `message` using `pubkey` (32 bytes).
+    ///
+    /// Returns `true` if valid, `false` otherwise (never throws).
+    pub fn verify(pubkey: &[u8], message: &[u8], signature: &[u8]) -> bool {
+        let Ok(vk_arr): Result<[u8; 32], _> = pubkey.try_into() else {
+            return false;
+        };
+        let Ok(sig_arr): Result<[u8; 64], _> = signature.try_into() else {
+            return false;
+        };
+        let Ok(vk) = VerifyingKey::from_bytes(&vk_arr) else {
+            return false;
+        };
+        let sig = Signature::from_bytes(&sig_arr);
+        vk.verify(message, &sig).is_ok()
+    }
+}
+
+// ─── WasmMultiSignOrchestrator ───────────────────────────────────────────────
+
+use serde::{Deserialize, Serialize};
+
+/// A single partial Ed25519 signature from one air-gapped signer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PartialSig {
+    signer_pubkey: String,
+    signature_b64: String,
+}
+
+/// The JSON envelope sent to each air-gapped signer (schema v2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MultiSignRequest {
+    version: u8,
+    nonce: String,
+    threshold: u8,
+    signers: Vec<String>,
+    round: u8,
+    partial_sigs: Vec<PartialSig>,
+    transaction_b64: String,
+    description: String,
+    created_at: i64,
+    cluster: String,
+}
+
+/// The JSON envelope returned by an air-gapped signer (schema v2).
+#[derive(Debug, Serialize, Deserialize)]
+struct MultiSignResponse {
+    version: u8,
+    nonce: String,
+    round: u8,
+    signer_pubkey: String,
+    signature_b64: String,
+}
+
+/// Orchestrates an M-of-N multi-signature session on the **online** machine.
+///
+/// ```js
+/// const orch = WasmMultiSignOrchestrator.new(
+///   txB64, ["pubkeyA","pubkeyB","pubkeyC"], 2, "devnet", "Treasury tx"
+/// );
+/// // Round 1 → send orch.get_request_json() as QR to signer A
+/// // Receive response JSON from signer A
+/// const done = orch.ingest_response_json(responseJson); // false
+/// // Round 2 → send orch.get_request_json() as QR to signer B
+/// const done2 = orch.ingest_response_json(responseJson2); // true (threshold=2)
+/// const partialSigsJson = orch.get_partial_sigs_json();
+/// ```
+#[wasm_bindgen]
+pub struct WasmMultiSignOrchestrator {
+    nonce: String,
+    threshold: u8,
+    signers: Vec<String>,
+    round: u8,
+    partial_sigs: Vec<PartialSig>,
+    transaction_b64: String,
+    description: String,
+    created_at: i64,
+    cluster: String,
+}
+
+#[wasm_bindgen]
+impl WasmMultiSignOrchestrator {
+    /// Create a new orchestration session.
+    ///
+    /// - `transaction_b64` — Base64-encoded unsigned Solana transaction bytes
+    /// - `signers`         — JS Array of N Base58 public key strings
+    /// - `threshold`       — M (minimum signatures required)
+    /// - `cluster`         — `"mainnet-beta"`, `"devnet"`, `"testnet"`, or `"localnet"`
+    /// - `description`     — Human-readable description shown to each signer
+    ///
+    /// # Errors
+    /// Throws if `threshold > signers.length` or entropy is unavailable.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        transaction_b64: &str,
+        signers: js_sys::Array,
+        threshold: u8,
+        cluster: &str,
+        description: &str,
+    ) -> Result<WasmMultiSignOrchestrator, JsValue> {
+        let signers: Vec<String> = signers
+            .iter()
+            .map(|v| {
+                v.as_string()
+                    .ok_or_else(|| JsValue::from_str("signers must be strings"))
+            })
+            .collect::<Result<_, _>>()?;
+
+        if threshold as usize > signers.len() {
+            return Err(JsValue::from_str("threshold cannot exceed number of signers"));
+        }
+        if signers.is_empty() {
+            return Err(JsValue::from_str("at least one signer required"));
+        }
+
+        // 16-byte random nonce → hex string
+        let mut nonce_bytes = [0u8; 16];
+        getrandom::fill(&mut nonce_bytes)
+            .map_err(|e| JsValue::from_str(&format!("getrandom error: {}", e)))?;
+        let nonce = hex::encode(nonce_bytes);
+
+        // Millisecond timestamp → seconds
+        let created_at = (js_sys::Date::now() / 1000.0) as i64;
+
+        Ok(Self {
+            nonce,
+            threshold,
+            signers,
+            round: 1,
+            partial_sigs: Vec::new(),
+            transaction_b64: transaction_b64.to_owned(),
+            description: description.to_owned(),
+            created_at,
+            cluster: cluster.to_owned(),
+        })
+    }
+
+    // ─── State queries ────────────────────────────────────────────────────────
+
+    /// Returns the current round number (1-based).
+    pub fn current_round(&self) -> u8 {
+        self.round
+    }
+
+    /// Returns the total number of signers.
+    pub fn signer_count(&self) -> usize {
+        self.signers.len()
+    }
+
+    /// Returns the required threshold M.
+    pub fn threshold(&self) -> u8 {
+        self.threshold
+    }
+
+    /// Returns `true` when enough partial signatures have been collected.
+    pub fn threshold_met(&self) -> bool {
+        self.partial_sigs.len() >= self.threshold as usize
+    }
+
+    /// Fraction of required signatures collected (0.0 – 1.0).
+    pub fn progress(&self) -> f64 {
+        if self.threshold == 0 {
+            return 1.0;
+        }
+        self.partial_sigs.len() as f64 / self.threshold as f64
+    }
+
+    /// Base58 pubkey expected to sign in the current round, or `undefined`.
+    pub fn current_signer_pubkey(&self) -> Option<String> {
+        let idx = self.round.checked_sub(1)? as usize;
+        self.signers.get(idx).cloned()
+    }
+
+    // ─── Round management ─────────────────────────────────────────────────────
+
+    /// Serialise the current-round request envelope to JSON.
+    ///
+    /// Display this JSON as a QR stream to the next air-gapped signer.
+    ///
+    /// # Errors
+    /// Throws if JSON serialisation fails (should never happen).
+    pub fn get_request_json(&self) -> Result<String, JsValue> {
+        let req = MultiSignRequest {
+            version: 2,
+            nonce: self.nonce.clone(),
+            threshold: self.threshold,
+            signers: self.signers.clone(),
+            round: self.round,
+            partial_sigs: self.partial_sigs.clone(),
+            transaction_b64: self.transaction_b64.clone(),
+            description: self.description.clone(),
+            created_at: self.created_at,
+            cluster: self.cluster.clone(),
+        };
+        serde_json::to_string_pretty(&req)
+            .map_err(|e| JsValue::from_str(&format!("serialisation error: {}", e)))
+    }
+
+    /// Feed a signer's JSON response into the orchestrator.
+    ///
+    /// Returns `true` if the signature threshold has been reached after this
+    /// response; `false` if more rounds are needed.
+    ///
+    /// # Errors
+    /// Throws if the JSON is malformed, the nonce doesn't match, the round is
+    /// wrong, or the pubkey is not the expected signer for this round.
+    pub fn ingest_response_json(&mut self, json: &str) -> Result<bool, JsValue> {
+        let resp: MultiSignResponse = serde_json::from_str(json)
+            .map_err(|e| JsValue::from_str(&format!("invalid response JSON: {}", e)))?;
+
+        // Replay-protection: nonce must match the session nonce.
+        if resp.nonce != self.nonce {
+            return Err(JsValue::from_str("nonce mismatch — possible replay attack"));
+        }
+
+        // Round must match.
+        if resp.round != self.round {
+            return Err(JsValue::from_str(&format!(
+                "expected round {}, got {}",
+                self.round, resp.round
+            )));
+        }
+
+        // Pubkey must be the expected signer for this round.
+        let expected = self
+            .current_signer_pubkey()
+            .ok_or_else(|| JsValue::from_str("no signer expected for this round"))?;
+        if resp.signer_pubkey != expected {
+            return Err(JsValue::from_str(&format!(
+                "expected signer {expected}, got {}",
+                resp.signer_pubkey
+            )));
+        }
+
+        // Duplicate-sig guard.
+        if self
+            .partial_sigs
+            .iter()
+            .any(|ps| ps.signer_pubkey == resp.signer_pubkey)
+        {
+            return Err(JsValue::from_str("duplicate signature from same pubkey"));
+        }
+
+        self.partial_sigs.push(PartialSig {
+            signer_pubkey: resp.signer_pubkey,
+            signature_b64: resp.signature_b64,
+        });
+        self.round += 1;
+
+        Ok(self.threshold_met())
+    }
+
+    // ─── Result extraction ────────────────────────────────────────────────────
+
+    /// Returns accumulated partial signatures as a JSON array.
+    ///
+    /// Each element: `{ "signer_pubkey": "...", "signature_b64": "..." }`.
+    /// Pass this to `@solana/web3.js` to embed signatures into the transaction.
+    ///
+    /// # Errors
+    /// Throws if serialisation fails (should never happen).
+    pub fn get_partial_sigs_json(&self) -> Result<String, JsValue> {
+        serde_json::to_string_pretty(&self.partial_sigs)
+            .map_err(|e| JsValue::from_str(&format!("serialisation error: {}", e)))
+    }
+
+    /// Returns the original Base64-encoded transaction bytes (unchanged —
+    /// signatures are carried separately via [`get_partial_sigs_json`]).
+    pub fn get_transaction_b64(&self) -> String {
+        self.transaction_b64.clone()
+    }
+
+    /// Returns the session nonce (hex) for external logging / debugging.
+    pub fn nonce(&self) -> String {
+        self.nonce.clone()
+    }
+}
+
+// ─── Internal helpers ─────────────────────────────────────────────────────────
+
+/// Minimal Base58 encoder (Bitcoin/Solana alphabet).
+fn bs58_encode(input: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let mut digits: Vec<u8> = Vec::with_capacity(input.len() * 140 / 100 + 1);
+    for &byte in input {
+        let mut carry = byte as usize;
+        for d in digits.iter_mut() {
+            carry += (*d as usize) << 8;
+            *d = (carry % 58) as u8;
+            carry /= 58;
+        }
+        while carry > 0 {
+            digits.push((carry % 58) as u8);
+            carry /= 58;
+        }
+    }
+    // leading zero bytes → leading '1's
+    let leading_ones = input.iter().take_while(|&&b| b == 0).count();
+    let mut out = String::with_capacity(leading_ones + digits.len());
+    for _ in 0..leading_ones {
+        out.push('1');
+    }
+    for &d in digits.iter().rev() {
+        out.push(ALPHABET[d as usize] as char);
+    }
+    out
+}

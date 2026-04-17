@@ -3,13 +3,15 @@ import { initWasm } from "./wasm.js";
 import { SendPage } from "./pages/SendPage.js";
 import { SignPage } from "./pages/SignPage.js";
 import { ReceivePage } from "./pages/ReceivePage.js";
+import { MultisigPage } from "./pages/MultisigPage.js";
 
-type Tab = "send" | "sign" | "receive";
+type Tab = "send" | "sign" | "receive" | "multisig";
 
 const TABS: { id: Tab; label: string; emoji: string }[] = [
-  { id: "send",    label: "1 · Prepare & Send",  emoji: "📡" },
-  { id: "sign",    label: "2 · Air-gap Sign",     emoji: "🔐" },
-  { id: "receive", label: "3 · Receive & Broadcast", emoji: "📨" },
+  { id: "send",     label: "1 · Prepare & Send",       emoji: "📡" },
+  { id: "sign",     label: "2 · Air-gap Sign",          emoji: "🔐" },
+  { id: "receive",  label: "3 · Receive & Broadcast",   emoji: "📨" },
+  { id: "multisig", label: "4 · M-of-N Multisig",       emoji: "🔏" },
 ];
 
 export function App() {
@@ -95,6 +97,7 @@ export function App() {
           onPasswordChange={setSharedPassword}
         />
       )}
+      {tab === "multisig" && <MultisigPage />}
     </div>
   );
 }

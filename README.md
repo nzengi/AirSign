@@ -1,619 +1,340 @@
 # AirSign
 
-**Air-gapped Solana transaction signing over an encrypted, fountain-coded QR stream.**
+**Air-gapped, fountain-coded, encrypted transaction signing for Solana.**
 
-No USB. No Bluetooth. No network cable. Only a camera.
+AirSign lets you sign Solana transactions on a device that has *never* touched the internet — using nothing but a webcam and QR codes. It is also the first open-source implementation of M-of-N multi-signature orchestration over an air-gap channel.
 
 ---
 
-## Why AirSign?
+## Table of Contents
 
-### The problem with existing solutions
+- [Why AirSign](#why-airsign)
+- [Architecture](#architecture)
+- [Security Model](#security-model)
+- [Features](#features)
+- [Workspace Layout](#workspace-layout)
+- [Quick Start](#quick-start)
+- [Protocol](#protocol)
+- [M-of-N Multisig](#m-of-n-multisig)
+- [Ledger Hardware Wallet](#ledger-hardware-wallet)
+- [Cryptography](#cryptography)
+- [CI & Testing](#ci--testing)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
 
-| Solution | Attack surface |
-|---|---|
-| **Ledger / Trezor** | USB or BLE connection; firmware must be trusted; supply-chain attacks on firmware updates are well documented |
-| **Paper wallet** | Private key must be typed into an online machine to sign — the key is exposed at signing time |
-| **Air-gapped laptop + USB drive** | USB ports are attack vectors (BadUSB, firmware implants); many high-security ops forbid USB entirely |
-| **AirSign** | **Zero electrical connection.** Private key never leaves the air-gapped machine. Only photons cross the gap. |
+---
 
-### Who actually needs this?
+## Why AirSign
 
-- **Validator operators** — sign reward-withdrawal transactions without keeping the withdrawal keypair on an online machine
-- **DAO treasuries** — offline multi-sig approval without flying signers to the same room
-- **Exchanges and custodians** — cold-wallet signing on machines with no USB ports (common in hardened datacentres)
-- **High-value token holders** — anyone who has ever typed a seed phrase into MetaMask and felt uneasy about it
+Hot wallets holding the private key on an online machine are the single largest attack surface in Solana key management. AirSign moves the private key onto a permanently offline device — an old laptop, a Raspberry Pi, even a phone in airplane mode — and communicates over an optical channel (QR codes) that carries no writable interface.
 
-### What makes AirSign different from "QR code hardware wallets" like Keystone?
+Compared to hardware wallets alone, AirSign adds:
 
-Keystone and AirSign share the same physical channel (QR codes), but differ in the cryptographic layer:
-
-- **Encrypted channel** — AirSign wraps every QR frame in ChaCha20-Poly1305 authenticated encryption. A camera pointed at the screen from across a room cannot read the transaction.
-- **Fountain coding** — An LT-code fountain encoder means the receiver can reconstruct the data from *any* sufficient subset of frames. Packet loss or a blurry frame does not stall the transfer.
-- **No proprietary firmware** — AirSign is a software library (Rust + WASM). Any machine that can run Rust or a modern browser can be the signer.
+| Capability | Hardware Wallet | AirSign |
+|---|---|---|
+| Air-gap (no USB/BT) | ✗ | ✓ |
+| M-of-N multisig | vendor-dependent | ✓ built-in |
+| Open-source crypto | partial | ✓ fully auditable |
+| Fountain-coded channel | ✗ | ✓ (survives frame loss) |
+| WASM browser support | via adapter | ✓ native |
+| Rust + TypeScript SDK | ✗ | ✓ |
 
 ---
 
 ## Architecture
 
-```text
-┌──────────────────────────────────┐       ┌──────────────────────────────────┐
-│        Online machine            │       │       Air-gapped machine         │
-│   (watch-only wallet / dApp)     │       │   (private key, never networked) │
-│                                  │       │                                  │
-│  1. Build unsigned Transaction   │       │                                  │
-│  2. SignRequest { tx, metadata } │       │                                  │
-│  3. Argon2id KDF → session key   │       │  Argon2id KDF → same session key │
-│  4. ChaCha20-Poly1305 encrypt    │       │                                  │
-│  5. LT fountain encode           │       │                                  │
-│  6. Animate QR frames ──────────►│──────►│  7. Camera captures QR stream    │
-│                                  │       │  8. Fountain decode              │
-│                                  │       │  9. Decrypt → SignRequest        │
-│                                  │       │ 10. Ed25519 sign                 │
-│                                  │       │ 11. Encrypt SignResponse          │
-│                                  │       │ 12. Animate QR frames            │
-│ 15. Inject signature(s)   ◄──────│◄──────│◄─── 13. Camera captures stream   │
-│ 16. send_and_confirm_tx          │       │                                  │
-│     → Solana cluster             │       │                                  │
-└──────────────────────────────────┘       └──────────────────────────────────┘
+```
+┌──────────────────────────────────────────────────────┐
+│                  ONLINE MACHINE                       │
+│                                                      │
+│  ┌────────────┐   unsigned tx    ┌────────────────┐  │
+│  │ dApp / CLI │ ───────────────▶ │  AirSign Send  │  │
+│  └────────────┘                  │  (fountain enc)│  │
+│                                  └───────┬────────┘  │
+│                                          │ QR stream  │
+└──────────────────────────────────────────┼───────────┘
+                                           │  ▲
+                              webcam/screen │  │ webcam
+                                           ▼  │
+┌──────────────────────────────────────────┼───────────┐
+│                 AIR-GAPPED MACHINE        │           │
+│                                          │           │
+│  ┌────────────────┐  ┌───────────────────┴────────┐  │
+│  │  AirSign Sign  │  │  AirSign Receive            │  │
+│  │  (decrypt +    │  │  (fountain decode +         │  │
+│  │   Ed25519 sign)│  │   display signed QR stream) │  │
+│  └───────┬────────┘  └────────────────────────────┘  │
+│          │ signed tx                                  │
+└──────────┼────────────────────────────────────────────┘
+           │ QR stream
+           ▼
+┌──────────────────────────────────────────────────────┐
+│                  ONLINE MACHINE                       │
+│                                                      │
+│  ┌────────────────┐                                  │
+│  │ AirSign Receive│ ──▶ broadcast to Solana RPC      │
+│  └────────────────┘                                  │
+└──────────────────────────────────────────────────────┘
+```
 
-Shared secret: a password known to both operators.
-Private key:   stays inside the right box forever.
+### Component Map
+
+```
+AirSign/
+├── crates/
+│   ├── afterimage-core/      # Pure Rust: fountain codes, AEAD crypto, protocol
+│   ├── afterimage-wasm/      # wasm-bindgen bindings for browser/Node.js
+│   │   └── tests/e2e.rs      # 15 native integration tests
+│   ├── afterimage-solana/    # Solana-specific: wallet, Ledger, multisig, preflight
+│   └── afterimage-cli/       # CLI entry-point (send / sign / receive / keygen)
+├── packages/
+│   └── react/                # @airsign/react — hooks + components for dApps
+└── apps/
+    └── signer-web/           # Vite + React demo web app (4 tabs)
 ```
 
 ---
 
-## Quick start
+## Security Model
+
+### Threat model
+
+AirSign assumes:
+
+1. **The online machine may be fully compromised.** An attacker with root access cannot extract the private key because it never exists on the online machine.
+2. **The QR optical channel is passive.** An attacker who records every QR frame learns only the ciphertext; without the shared password the plaintext is computationally inaccessible.
+3. **The air-gapped machine is trusted.** Physical security of the offline device is the user's responsibility.
+
+### Cryptographic guarantees
+
+- **Key derivation** — Argon2id (m = 65536, t = 3, p = 1) from the shared password and a per-session random salt. An attacker must brute-force Argon2id, not AES.
+- **Encryption** — ChaCha20-Poly1305 (AEAD). Every frame carries an independent authentication tag; a single flipped bit causes the entire frame to be rejected.
+- **Signing** — Ed25519 (ed25519-dalek v2). Deterministic, constant-time, no k-reuse risk.
+- **Session nonce** — 16 random bytes generated by the OS CSPRNG (`getrandom`). Replay attacks across sessions are infeasible.
+- **Forward secrecy** — Each session derives a fresh key. Compromise of one session's password does not expose other sessions.
+
+### What AirSign does NOT do
+
+- It does not provide a secure enclave or TEE; the private key exists in RAM on the air-gapped machine.
+- It does not protect against a malicious QR frame that exploits a vulnerability in the QR decoder library.
+- It does not enforce rate-limiting on password attempts; operators should use a strong, unique password per session.
+
+---
+
+## Features
+
+- **Fountain-coded QR stream** — LT (Luby Transform) codes allow the receiver to decode even if up to ~30 % of frames are missed or corrupted. No frame ordering required.
+- **End-to-end AEAD encryption** — ChaCha20-Poly1305 with Argon2id key derivation.
+- **M-of-N multisig orchestration** — Coordinate signatures from multiple air-gapped devices sequentially. Each round is independently authenticated with a shared session nonce.
+- **Ledger hardware wallet support** — Send signing requests to a Ledger Nano via APDU over the AirSign optical channel.
+- **Solana transaction preflight** — Simulate a transaction against devnet/mainnet before signing to prevent signing invalid or malicious transactions.
+- **Transaction inspector** — Decode and display Solana transaction instructions in human-readable form before the signer approves.
+- **Browser-native WASM** — The entire crypto stack compiles to `wasm32-unknown-unknown`; no Node.js required.
+- **React SDK** — `@airsign/react` ships `useSendSession`, `useRecvSession`, `<QrAnimator />`, `<QrScanner />`, and `<TransactionReview />` for easy dApp integration.
+
+---
+
+## Workspace Layout
+
+| Crate / Package | Language | Description |
+|---|---|---|
+| `afterimage-core` | Rust | Fountain codes, ChaCha20-Poly1305, Argon2id, session state machines |
+| `afterimage-wasm` | Rust + wasm-bindgen | Browser/Node.js bindings; `WasmSendSession`, `WasmRecvSession`, `WasmKeypair`, `WasmMultiSignOrchestrator` |
+| `afterimage-solana` | Rust | Solana wallet, Ledger APDU, transaction preflight, inspector, multisig request/response |
+| `afterimage-cli` | Rust | `airsign send`, `airsign sign`, `airsign receive`, `airsign keygen`, `airsign multisig` |
+| `@airsign/react` | TypeScript | React hooks and components |
+| `signer-web` | TypeScript + Vite | Demo web application |
+
+---
+
+## Quick Start
 
 ### Prerequisites
 
-- Rust stable ≥ 1.78
-- A webcam on the online machine (or any camera capable of reading QR codes)
-- Optionally: a second machine with no network connectivity (the air-gapped signer)
-
-### Build
+- Rust (stable + `wasm32-unknown-unknown` target)
+- `wasm-pack`
+- Node.js ≥ 18, pnpm
 
 ```bash
+# Clone
 git clone https://github.com/nzengi/AirSign.git
 cd AirSign
-cargo build --release -p airsign          # CLI binary
-cargo build --release -p afterimage-solana  # Solana signing library
+
+# Build WASM
+wasm-pack build crates/afterimage-wasm --target web --out-dir apps/signer-web/public/wasm
+
+# Install JS deps
+pnpm install
+
+# Start dev server
+pnpm --filter signer-web dev
 ```
 
-For headless / CI (no camera or display):
+Open `http://localhost:5173` — four tabs: **Prepare & Send**, **Air-gap Sign**, **Receive & Broadcast**, **M-of-N Multisig**.
+
+### CLI
 
 ```bash
-cargo build --release -p airsign --no-default-features
-```
+# Build CLI
+cargo build -p afterimage-cli --release
 
-### Sign and broadcast a Solana transaction (full flow)
+# Generate a keypair (stored encrypted on the air-gapped machine)
+./target/release/airsign keygen --output ~/.airsign/keypair.json
 
-**Online machine** — prepare the unsigned transaction and start the QR stream:
+# On the ONLINE machine — prepare and display the QR stream
+./target/release/airsign send --tx <BASE64_TX> --password <PASSWORD>
 
-```bash
-# Example: sign a simple SOL transfer on devnet
-# (your dApp or wallet generates the unsigned tx bytes)
-airsign send unsigned_tx.json --fps 8
-```
+# On the AIR-GAPPED machine — scan and sign
+./target/release/airsign sign --password <PASSWORD>
 
-**Air-gapped machine** — receive, sign, and transmit back:
-
-```bash
-airsign recv sign_request.json --camera-index 0
-# AirSigner loads your keypair from AIRSIGN_KEYPAIR_PATH or prompts
-airsign send sign_response.json --fps 8
-```
-
-**Online machine** — receive the signature and broadcast:
-
-```bash
-airsign recv sign_response.json --camera-index 0
-airsign broadcast sign_response.json --cluster devnet
-# prints: https://explorer.solana.com/tx/<SIGNATURE>?cluster=devnet
-```
-
-### Offline benchmark (no hardware required)
-
-```bash
-echo "benchmark payload" > test.bin
-airsign bench test.bin
-# [bench] ✓ roundtrip OK in 12 ms (1.4 MB/s)
+# On the ONLINE machine — receive the signed transaction and broadcast
+./target/release/airsign receive --password <PASSWORD> --rpc https://api.devnet.solana.com
 ```
 
 ---
 
-## Packages
+## Protocol
 
-### React SDK — `@airsign/react`
+### Frame format (v2)
 
-A batteries-included TypeScript/React package for building air-gapped Solana
-signing UIs in the browser.  Wraps the AfterImage WASM module with ergonomic
-hooks and ready-to-use components.
-
-```bash
-npm install @airsign/react qrcode jsqr
+```
+[ version: u8 ][ session_id: [u8; 16] ][ frame_index: u32 ]
+[ total_frames: u32 ][ dropout_symbols: u32 ]
+[ ciphertext: variable ][ poly1305_tag: [u8; 16] ]
 ```
 
-**Bootstrap** (once, before rendering):
+- `version` — protocol version, currently `2`.
+- `session_id` — 16-byte random nonce, stable for the lifetime of one send/receive session.
+- `frame_index` / `total_frames` — fountain code metadata.
+- `dropout_symbols` — LT-code degree for this frame.
+- `ciphertext` — ChaCha20-encrypted payload fragment.
+- `poly1305_tag` — authentication tag covering all preceding fields and the ciphertext.
+
+Frames are serialised to binary and then Base45-encoded for QR data encoding (alphanumeric mode, higher density than Base64).
+
+### Key derivation
+
+```
+salt   = random_bytes(32)             # included in session header frame
+key    = Argon2id(password, salt,
+                  m=65536, t=3, p=1)  # 32-byte ChaCha20 key
+nonce  = random_bytes(12)             # per-frame, derived from frame_index + session_id
+```
+
+---
+
+## M-of-N Multisig
+
+AirSign implements sequential M-of-N signing without any on-chain program. Each round:
+
+1. The **orchestrator** (online machine) produces a `MultiSignRequest` JSON containing:
+   - Session nonce (anti-replay)
+   - Round number and expected signer pubkey
+   - The unsigned transaction bytes (Base64)
+   - Human-readable description for the signer to review
+
+2. The **signer** (air-gapped machine) receives the request via QR stream, verifies the nonce and round, signs the transaction bytes with their Ed25519 key, and returns a `MultiSignResponse` JSON.
+
+3. The orchestrator verifies the response signature against the expected pubkey, stores the partial signature, and advances to the next round.
+
+4. Once M signatures are collected, the orchestrator outputs a `PartialSignatures` JSON ready for `@solana/web3.js`:
 
 ```ts
-import { initAirSign } from "@airsign/react";
-await initAirSign(); // loads the WASM bundle
+for (const { signer_pubkey, signature_b64 } of partialSigs) {
+  transaction.addSignature(
+    new PublicKey(signer_pubkey),
+    Buffer.from(signature_b64, "base64")
+  );
+}
+await connection.sendRawTransaction(transaction.serialize());
 ```
 
-**Send side** — animate a QR stream from an unsigned transaction:
+### Example: 2-of-3 treasury multisig
 
-```tsx
-import { QrAnimator } from "@airsign/react";
+```
+Signers: Alice (A), Bob (B), Carol (C)
+Threshold: 2
 
-<QrAnimator
-  data={unsignedTxBytes}
-  filename="unsigned_tx.bin"
-  password="shared-secret"
-  fps={8}
-  onComplete={() => setStep("waiting_for_signature")}
-/>
+Round 1 → Request sent to A → A signs → Response accepted
+Round 2 → Request sent to B → B signs → Response accepted
+Threshold met (2/3) → PartialSignatures output
 ```
 
-**Receive side** — scan the signed response back:
+Carol's key is never contacted. The session nonce prevents an attacker from replaying a valid response from a previous session.
 
-```tsx
-import { QrScanner } from "@airsign/react";
+---
 
-<QrScanner
-  password="shared-secret"
-  onComplete={(data, filename) => broadcastTransaction(data)}
-  onProgress={(p) => setProgress(p)}
-/>
-```
+## Ledger Hardware Wallet
 
-**Transaction review** — show a human-readable summary with risk flags:
+AirSign can route signing requests to a Ledger Nano S/X connected to the air-gapped machine. The `afterimage-solana` crate constructs the correct APDU sequence for the Solana Ledger app and presents the signed response in the standard AirSign `MultiSignResponse` format.
 
-```tsx
-import { TransactionReview } from "@airsign/react";
-
-<TransactionReview summary={inspectorOutput} showFields />
-```
-
-**Hooks** — use directly for custom UIs:
-
-```ts
-import { useSendSession, useRecvSession } from "@airsign/react";
-
-const { start, stop, reset, progress, frameIndex, isDone } =
-  useSendSession({ data, password, fps: 8 });
-
-const { ingest, progress, isComplete, error } =
-  useRecvSession({ password, onComplete: (buf) => broadcast(buf) });
+```bash
+airsign sign --ledger --hd-path "44'/501'/0'/0'"
 ```
 
 ---
 
-## Crate structure
+## Cryptography
 
-| Crate | Purpose |
-|---|---|
-| `afterimage-core` | Protocol framing, fountain coding, Argon2id KDF, ChaCha20-Poly1305 encryption |
-| `afterimage-optical` | QR encode/decode, camera capture, display window |
-| `afterimage-solana` | `AirSigner` (Ed25519 signing), `KeyStore` (OS keychain), `LedgerSigner` (HID), `WatchWallet` + `TransactionBuilder` (offline tx construction), `TransactionInspector` (static analysis), `PreflightChecker` (RPC simulation), `Broadcaster` (RPC submit) |
-| `afterimage-wasm` | WASM bindings for browser-based signers |
-| `airsign` (CLI) | `send`, `recv`, `bench`, `sign`, `inspect`, `prepare`, `broadcast`, `key`, `ledger`, `multisign` subcommands |
-
----
-
-## Security model
-
-- **The private key never leaves the air-gapped machine.** The only data transmitted online → offline is the unsigned transaction (not sensitive). The only data transmitted offline → online is the Ed25519 signature and signed transaction bytes.
-- **The optical channel is encrypted.** ChaCha20-Poly1305 with a key derived via Argon2id from a shared password. An observer with a camera recording the QR stream learns nothing without the password.
-- **Replay protection.** Each `SignRequest` contains a random 32-byte nonce. The `AirSigner` rejects any `SignResponse` whose nonce does not match.
-- **No unsafe code.** `#![forbid(unsafe_code)]` is set on all crates.
-
-### Threat model (what AirSign does *not* protect against)
-
-- A compromised display driver or OS on the online machine that shows a different transaction than the one the user approved.
-- Physical compromise of the air-gapped machine itself.
-- Password brute-force if the shared secret is weak.
-
----
-
-## WASM build
-
-```bash
-cargo install wasm-pack
-wasm-pack build crates/afterimage-wasm --target web
-```
-
-The generated `pkg/` directory can be imported directly into any JavaScript/TypeScript project.
-
----
-
-## Building unsigned transactions (`airsign prepare`)
-
-Use `airsign prepare` to construct an unsigned transaction directly from the
-command line — no custom dApp or wallet software required.  The output is a
-raw bincode `Transaction` file that can be piped straight into `airsign inspect`
-or `airsign send`.
-
-### SOL transfer
-
-```bash
-airsign prepare transfer \
-  --from 4wTQaBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890AB \
-  --to   9xRzAbCdEfGhIjKlMnOpQrStUvWxYZ12345678CD \
-  --amount 1.5 \
-  --memo "treasury payout Q2-2026" \
-  --cluster devnet \
-  --out unsigned_tx.bin
-```
-
-### SPL Token transfer
-
-ATAs are derived automatically if `--from-ata` / `--to-ata` are omitted.
-
-```bash
-airsign prepare token-transfer \
-  --from     4wTQaBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890AB \
-  --to       9xRzAbCdEfGhIjKlMnOpQrStUvWxYZ12345678CD \
-  --mint     EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v \
-  --amount   1000000 \
-  --decimals 6 \
-  --cluster  mainnet \
-  --out      unsigned_tx.bin
-```
-
-### Stake account withdrawal
-
-```bash
-# Withdraw 5 SOL
-airsign prepare stake-withdraw \
-  --from          4wTQaBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890AB \
-  --stake-account 3kZjAbCdEfGhIjKlMnOpQrStUvWxYZ1234567890AB \
-  --to            9xRzAbCdEfGhIjKlMnOpQrStUvWxYZ12345678CD \
-  --amount        5.0 \
-  --cluster       mainnet \
-  --out           unsigned_tx.bin
-
-# Or withdraw the entire balance
-airsign prepare stake-withdraw \
-  --from          4wTQaBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890AB \
-  --stake-account 3kZjAbCdEfGhIjKlMnOpQrStUvWxYZ1234567890AB \
-  --to            9xRzAbCdEfGhIjKlMnOpQrStUvWxYZ12345678CD \
-  --amount-all \
-  --cluster       mainnet \
-  --out           unsigned_tx.bin
-```
-
-### Full workflow with `prepare`
-
-```bash
-# 1. Build the unsigned tx
-airsign prepare transfer --from <ONLINE_PK> --to <DEST_PK> --amount 2.0 --cluster mainnet
-
-# 2. Inspect it before sending
-airsign inspect unsigned_tx.bin --cluster mainnet --simulate
-
-# 3. Send over QR to the air-gapped machine
-airsign send unsigned_tx.bin --fps 8
-
-# (on air-gapped machine)
-airsign recv sign_request.json
-airsign sign sign_request.json --keypair ~/.config/solana/id.json
-airsign send sign_response.json --fps 8
-
-# 4. Receive signature and broadcast
-airsign recv sign_response.json
-airsign broadcast sign_response.json --cluster mainnet
-```
-
----
-
-## Transaction inspection and pre-flight
-
-Before signing (or independently of the signing flow), you can inspect any
-transaction file and run an optional RPC simulation:
-
-```bash
-# Static analysis only (no network required)
-airsign inspect unsigned_tx.bin
-
-# Parse a SignRequest JSON and inspect it
-airsign inspect sign_request.json
-
-# Static analysis + RPC simulation against devnet
-airsign inspect sign_request.json --cluster devnet --simulate
-```
-
-### What the inspector checks
-
-The inspector decodes every instruction in the transaction and displays a
-structured summary:
-
-| Instruction type | Fields shown |
-|---|---|
-| System :: Transfer | from, to, amount in SOL |
-| SPL Token :: Transfer | source, dest, mint, amount |
-| SPL Token :: MintTo | mint, dest, amount |
-| SPL Token :: Burn | source, mint, amount |
-| SPL Token :: SetAuthority | account, authority type, new authority |
-| ATA :: Create | payer, wallet, mint |
-| Memo | text content |
-| Unknown | program ID, data hex, account count |
-
-Risk flags are raised automatically:
-
-| Flag | Severity | Trigger |
+| Primitive | Library | Purpose |
 |---|---|---|
-| `LARGE_SOL_TRANSFER` | HIGH | any single SOL transfer ≥ 100 SOL |
-| `LARGE_TOKEN_TRANSFER` | HIGH | any token transfer ≥ 1 000 000 |
-| `UPGRADE_AUTHORITY_CHANGE` | HIGH | `SetAuthority` on an upgrade-authority slot |
-| `UNKNOWN_PROGRAM` | MEDIUM | any instruction targeting an unrecognised program |
-| `SYSTEM_ACCOUNT_WRITE` | MEDIUM | system accounts (e.g. System Program) in writable position |
+| ChaCha20-Poly1305 | `chacha20poly1305` (RustCrypto) | Frame encryption + authentication |
+| Argon2id | `argon2` (RustCrypto) | Password-based key derivation |
+| Ed25519 | `ed25519-dalek` v2 | Transaction signing and verification |
+| BLAKE2b | `blake2` (RustCrypto) | Session ID derivation, integrity checks |
+| PBKDF2-HMAC-SHA256 | `pbkdf2` (RustCrypto) | Keystore encryption (legacy compat) |
+| `getrandom` | `getrandom` | OS-backed CSPRNG for nonces and salts |
 
-The command exits with code **0** if no HIGH risk flags were found, or **2**
-if one or more HIGH risk flags are raised — making it easy to gate CI or
-scripted signing flows:
-
-```bash
-airsign inspect sign_request.json || { echo "HIGH RISK — aborting"; exit 1; }
-```
-
-### Pre-flight (RPC simulation + fee estimation)
-
-When `--cluster` is supplied (with or without `--simulate`), `airsign inspect`
-also calls the cluster's `getFeeForMessage` RPC method and, if `--simulate` is
-set, `simulateTransaction`.  The fee and simulation logs are printed below the
-static summary.
-
-```
-Pre-flight against https://api.devnet.solana.com
-  Fee              : 5000 lamports (0.000005000 SOL)
-  Simulation       : ✓ success
-  Compute units    : 450
-```
+All cryptographic dependencies are part of the **RustCrypto** organisation, which maintains a consistent standard of `#![no_std]` support, constant-time implementations, and community audits.
 
 ---
 
-## Ledger hardware wallet
+## CI & Testing
 
-AirSign supports Ledger devices (Nano S, Nano X, Nano S+, Stax, Flex) as an
-alternative signing backend.  The device communicates over USB HID — no
-proprietary Ledger Live software is required.
-
-### Prerequisites
-
-1. Connect the Ledger via USB.
-2. Unlock the device with your PIN.
-3. Open the **Solana** app on the device.
-4. On Linux, add a udev rule so the device is accessible without `sudo`:
-   ```text
-   SUBSYSTEM=="usb", ATTRS{idVendor}=="2c97", MODE="0660", GROUP="plugdev"
-   ```
-
-### List connected devices
-
-```bash
-airsign ledger list
-# [airsign] 1 Ledger device(s) found:
-#   [0] Nano X  serial=abc123  path=/dev/hidraw2
+```
+cargo test --workspace          # all unit tests
+cargo test -p afterimage-wasm   # 15 e2e integration tests (native)
+wasm-pack test --headless --chrome crates/afterimage-wasm  # browser tests
+pnpm --filter @airsign/react test  # TypeScript hook tests (vitest)
 ```
 
-### Show the Solana app version
+The GitHub Actions workflow (`.github/workflows/ci.yml`) runs:
 
-```bash
-airsign ledger version
-# Solana app v1.4.0
-```
+- `cargo check --workspace`
+- `cargo test --workspace`
+- `cargo clippy --workspace -- -D warnings`
+- `cargo fmt --check`
+- `wasm-pack build` (smoke test)
+- `pnpm test` (TypeScript)
 
-### Get the public key for a derivation path
-
-```bash
-# Default BIP44 path: m/44'/501'/0'/0'
-airsign ledger pubkey
-
-# Custom path with on-device confirmation
-airsign ledger pubkey --derivation "m/44'/501'/1'/0'" --confirm
-# [airsign] please approve on the Ledger display…
-# Hx3k…
-```
-
-### Sign a transaction with a Ledger
-
-Use the `ledger:` prefix in `--keypair`.  The default path
-(`m/44'/501'/0'/0'`) is used when you write `ledger:default`.
-
-```bash
-airsign sign request.json --keypair "ledger:m/44'/501'/0'/0'"
-# [airsign] Ledger: Nano X (pid=0x0004, serial=abc123)
-# [airsign] please approve on the Ledger display…
-# [airsign] ✓ signed — response written to sign_response.json
-```
+All checks must pass before merging to `main`.
 
 ---
-
-## Key management (OS keychain)
-
-AirSign v2.2.0 adds native keychain integration so that your Ed25519 signing
-keypair never has to live as a plaintext JSON file.
-
-### Generate a new keypair and store it in the OS keychain
-
-```bash
-airsign key generate my-mainnet-key
-# [airsign] ✓ generated keypair 'my-mainnet-key'
-# [airsign]   public key : 4wTQ…
-# [airsign]   stored in  : OS keychain (service=airsign, account=my-mainnet-key)
-```
-
-### Import an existing Solana CLI keypair file
-
-```bash
-airsign key import my-mainnet-key --file ~/.config/solana/id.json
-```
-
-### Sign using a keychain key
-
-```bash
-# Instead of: --keypair ~/.config/solana/id.json
-airsign sign request.json --keypair keychain:my-mainnet-key
-```
-
-### Export back to a file (e.g. for use with the Solana CLI)
-
-```bash
-airsign key export my-mainnet-key --output /tmp/id.json
-```
-
-### List all stored keys
-
-```bash
-airsign key list
-  my-mainnet-key  →  4wTQ…
-  devnet-hot-key  →  9xRz…
-```
-
-### Delete a key (irreversible)
-
-```bash
-airsign key delete my-mainnet-key
-# [airsign] delete 'my-mainnet-key' from OS keychain? This cannot be undone. [y/N]:
-```
-
-The keychain service name is always `airsign`; the account name is the label
-you supply. On macOS the entry is visible in **Keychain Access.app** under
-*Login → Passwords*, filtered by service `airsign`.
-
----
-
-## Changelog
-
-### v2.2.0 — OS keychain integration
-
-- `afterimage-solana::keystore::KeyStore` — full CRUD for Ed25519 keypairs in
-  the platform keychain (macOS / Linux / Windows).
-- `airsign key` subcommand: `generate`, `import`, `show`, `list`, `export`,
-  `delete`.
-- `airsign sign --keypair keychain:<LABEL>` — load signing key directly from
-  the OS keychain.
-- `KeyStoreError` enum with typed variants.
-- 7 unit tests covering the full `KeyStore` lifecycle.
-
-### v2.1.0 — Security profiles
-
-- **`SecurityProfile` enum** (`owasp-2024` / `mainnet` / `paranoid`) with
-  pre-tuned Argon2id parameters for every threat level.
-- **`--security-profile <PROFILE>`** CLI flag on `airsign send` — mutually
-  exclusive with `--argon2-mem` / `--argon2-iter`.
-- `airsign send` now prints the active profile and warns when params are below
-  the mainnet minimum (256 MiB / t=4).
-- `Argon2Params::meets_mainnet_minimum()` and `security_level()` helpers.
-
-```bash
-# OWASP 2024 minimum (default — 64 MiB / t=3)
-airsign send unsigned_tx.json --fps 8
-
-# Recommended for mainnet-beta (256 MiB / t=4)
-airsign send unsigned_tx.json --fps 8 --security-profile mainnet
-
-# Maximum hardening (512 MiB / t=5)
-airsign send unsigned_tx.json --fps 8 --security-profile paranoid
-```
-
-| Profile | Memory | Iterations | Use case |
-|---|---|---|---|
-| `owasp-2024` | 64 MiB | t=3 | Devnet / testnet (default) |
-| `mainnet` | 256 MiB | t=4 | Mainnet-beta transactions |
-| `paranoid` | 512 MiB | t=5 | Extreme-value signing |
-
-### v2.0.0 — Protocol v3 + Configurable Argon2id
-
-- **Protocol v3 frame** (85 bytes): embeds `argon2_m_cost` and `argon2_t_cost`
-  directly in the METADATA frame so receivers never need out-of-band KDF config.
-- **`SendSession::new_with_argon2_params`** — create a v3 session with custom
-  Argon2id parameters.
-- **`RecvSession`** auto-reads Argon2 params from the v3 METADATA frame.
-- **CLI `airsign send`** gains `--argon2-mem <KiB>` and `--argon2-iter <N>` flags
-  (defaults: 64 MiB / 3 iterations — OWASP 2024 minimums).
-- **`Argon2Params`** and `META_SIZE_V2` / `META_SIZE_V3` are now public exports.
-- Full backward compatibility: v1 and v2 frames decode unchanged.
 
 ## Roadmap
 
-| Milestone | Status | Notes |
-|---|---|---|
-| AirSign v1 core (sign + broadcast) | ✅ Done | `afterimage-solana` crate |
-| Persistent nonce store (replay protection) | ✅ Done | `~/.airsign/seen_nonces.json` |
-| Terminal tx review + confirmation prompt | ✅ Done | `sign_request_confirmed()` |
-| Versioned sign envelopes (v1) | ✅ Done | `SignRequest::version` field |
-| `airsign sign` CLI subcommand | ✅ Done | `airsign sign <req.json> --keypair <path> [--yes]` |
-| Password hardening (Argon2id tuning) | 🔜 Next | Increase memory cost for mainnet use; configurable via `--argon2-mem` |
-| Multi-signature support | ✅ Done | M-of-N sequential QR rounds via `airsign multisign init/sign/next` |
-| Hardware-backed key storage | 🔜 Planned | Optionally store keypair in OS keychain / TPM |
-| External security audit | 🔜 Planned | Independent review of crypto and protocol before v1.0.0 release |
-| `crates.io` publish | 🔜 Planned | After audit sign-off |
-
----
-
-## M-of-N Multi-Signature Workflow
-
-AirSign supports M-of-N sequential multi-signature sessions.  Each round
-travels through the standard encrypted QR channel — no signers need to be
-in the same room or online at the same time.
-
-```
- ┌──────────────────────────────────────────────────────────────────────┐
- │                       ONLINE MACHINE                                 │
- │  airsign multisign init tx.bin                                       │
- │    --signers A,B,C --threshold 2 --out round1.json                   │
- │  airsign send round1.json                                            │
- └────────────────────────────┬─────────────────────────────────────────┘
-          QR stream (encrypted)│
-                               ▼
- ┌──────────────────────────────────────────────────────────────────────┐
- │               AIR-GAPPED MACHINE — Signer A                         │
- │  airsign recv round1.json                                            │
- │  airsign multisign sign round1.json --keypair id.json --out resp1.json│
- │  airsign send resp1.json                                             │
- └────────────────────────────┬─────────────────────────────────────────┘
-          QR stream (encrypted)│
-                               ▼
- ┌──────────────────────────────────────────────────────────────────────┐
- │                       ONLINE MACHINE                                 │
- │  airsign recv resp1.json                                             │
- │  airsign multisign next resp1.json --request round1.json             │
- │    --out round2.json                                                 │
- │  airsign send round2.json                                            │
- └────────────────────────────┬─────────────────────────────────────────┘
-          QR stream (encrypted)│
-                               ▼
- ┌──────────────────────────────────────────────────────────────────────┐
- │               AIR-GAPPED MACHINE — Signer B                         │
- │  airsign recv round2.json                                            │
- │  airsign multisign sign round2.json --keypair id.json --out resp2.json│
- │    → complete=true (threshold met)                                   │
- │  airsign send resp2.json                                             │
- └────────────────────────────┬─────────────────────────────────────────┘
-          QR stream (encrypted)│
-                               ▼
- ┌──────────────────────────────────────────────────────────────────────┐
- │                       ONLINE MACHINE                                 │
- │  airsign recv resp2.json                                             │
- │  airsign broadcast resp2.json --cluster mainnet-beta                 │
- └──────────────────────────────────────────────────────────────────────┘
-```
-
-**Security properties:**
-
-- No private key material ever crosses the air gap — only public Ed25519 signature bytes travel in the response.
-- Each signer verifies all prior partial signatures before adding its own (chain-of-custody check).
-- A 32-byte random nonce embedded at session creation prevents cross-session replay attacks.
-- Each round locks the expected signer pubkey; presenting the wrong keypair is rejected immediately.
+- [ ] **Squads / SPL Governance integration** — emit partial signatures in a format consumable by the Squads v4 multisig program.
+- [ ] **Threshold signature scheme (FROST)** — replace sequential M-of-N with a non-interactive FROST round, producing a single aggregated signature.
+- [ ] **NFC channel** — alternative to QR codes for devices with NFC capability.
+- [ ] **Mobile companion app** — React Native app that acts as the air-gapped signer (airplane mode enforced).
+- [ ] **Formal security audit** — independent review of the cryptographic protocol and Rust implementation.
+- [ ] **Devnet faucet integration** — one-click airdrop + sign + broadcast demo for new users.
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). In short: `cargo fmt`, `cargo clippy -- -D warnings`, tests required for new behaviour.
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) first.
+
+For security vulnerabilities, see [SECURITY.md](SECURITY.md) — do **not** open a public issue.
+
+---
 
 ## License
 
-AGPL-3.0-or-later — see [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE](LICENSE).
+
+---
+
+*AirSign is not affiliated with Solana Labs or the Solana Foundation. Use at your own risk. Always verify transaction contents on the air-gapped device before signing.*
