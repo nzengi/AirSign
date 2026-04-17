@@ -25,6 +25,8 @@ use afterimage_solana::{
     broadcaster::Broadcaster,
     signer::{AirSigner, summarize_request, default_nonce_store_path},
     SignRequest,
+    MultiSignRequest, MultiSignResponse, MultiSigner,
+    build_multisig_session, advance_round_from,
 };
 
 // ─── CLI definition ───────────────────────────────────────────────────────────
@@ -132,6 +134,21 @@ enum Commands {
         yes: bool,
     },
 
+    /// M-of-N multi-signature session management.
+    ///
+    /// Three sub-operations are provided:
+    ///
+    /// `init`  — online machine: create a round-1 MultiSignRequest from an
+    ///           unsigned transaction binary.
+    ///
+    /// `sign`  — air-gapped machine: load a MultiSignRequest JSON, sign it,
+    ///           write a MultiSignResponse JSON.
+    ///
+    /// `next`  — online machine: advance to the next round by combining
+    ///           a MultiSignResponse with the original MultiSignRequest.
+    #[command(subcommand)]
+    Multisign(MultisignCommands),
+
     /// Broadcast a signed-transaction file (SignResponse JSON) to a Solana cluster.
     Broadcast {
         /// Path to the SignResponse JSON file produced by the air-gapped machine.
@@ -176,10 +193,272 @@ fn main() {
             yes,
         } => cmd_sign(request_file, keypair, output, nonce_store, no_nonce_store, yes),
 
+        Commands::Multisign(sub) => cmd_multisign(sub),
+
         Commands::Broadcast {
             response_file,
             cluster,
         } => cmd_broadcast(response_file, cluster),
+    }
+}
+
+// ─── multisign sub-commands ───────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum MultisignCommands {
+    /// Create a round-1 MultiSignRequest from an unsigned transaction binary.
+    ///
+    /// The transaction binary must be a raw bincode-serialised
+    /// `solana_sdk::transaction::Transaction` (unsigned).
+    Init {
+        /// Path to the unsigned transaction binary file.
+        #[arg(value_name = "TX_FILE")]
+        tx_file: PathBuf,
+
+        /// Comma-separated ordered list of signer public keys (base58).
+        /// Round 1 goes to the first key, round 2 to the second, etc.
+        #[arg(long, value_name = "PUBKEY,...")]
+        signers: String,
+
+        /// Minimum number of signatures required (M in M-of-N).
+        #[arg(long, value_name = "N")]
+        threshold: u8,
+
+        /// Human-readable description embedded in the request.
+        #[arg(long, default_value = "")]
+        description: String,
+
+        /// Solana cluster hint embedded in the request.
+        #[arg(long, default_value = "devnet")]
+        cluster: String,
+
+        /// Output path for the round-1 MultiSignRequest JSON.
+        #[arg(long, default_value = "round1.json")]
+        out: PathBuf,
+    },
+
+    /// Sign a MultiSignRequest JSON (air-gapped machine).
+    ///
+    /// Reads a MultiSignRequest JSON, verifies all prior partial signatures,
+    /// signs with the provided keypair, and writes a MultiSignResponse JSON.
+    Sign {
+        /// Path to the MultiSignRequest JSON file.
+        #[arg(value_name = "REQUEST_FILE")]
+        request_file: PathBuf,
+
+        /// Path to the Solana keypair JSON file (64-byte array).
+        #[arg(long, value_name = "PATH", env = "AIRSIGN_KEYPAIR")]
+        keypair: PathBuf,
+
+        /// Output path for the MultiSignResponse JSON.
+        #[arg(long, default_value = "multisig_response.json")]
+        out: PathBuf,
+    },
+
+    /// Advance to the next round (online machine).
+    ///
+    /// Combines a MultiSignResponse with the original MultiSignRequest to
+    /// produce the next round's MultiSignRequest JSON.  If the response is
+    /// already complete (threshold met), exits with a message instead.
+    Next {
+        /// Path to the MultiSignResponse JSON from the previous round.
+        #[arg(value_name = "RESPONSE_FILE")]
+        response_file: PathBuf,
+
+        /// Path to the original (round-1) MultiSignRequest JSON.
+        #[arg(long, value_name = "PATH")]
+        request: PathBuf,
+
+        /// Output path for the next round's MultiSignRequest JSON.
+        #[arg(long, default_value = "next_round.json")]
+        out: PathBuf,
+    },
+}
+
+// ─── multisign ────────────────────────────────────────────────────────────────
+
+fn cmd_multisign(sub: MultisignCommands) {
+    match sub {
+        MultisignCommands::Init {
+            tx_file,
+            signers,
+            threshold,
+            description,
+            cluster,
+            out,
+        } => {
+            // Parse the tx binary
+            let tx_bytes = std::fs::read(&tx_file).unwrap_or_else(|e| {
+                eprintln!("error: cannot read {:?}: {e}", tx_file);
+                std::process::exit(1);
+            });
+            let tx: solana_sdk::transaction::Transaction =
+                bincode::deserialize(&tx_bytes).unwrap_or_else(|e| {
+                    eprintln!("error: {:?} is not a valid bincode Transaction: {e}", tx_file);
+                    std::process::exit(1);
+                });
+
+            // Parse signer pubkeys
+            let signer_pubkeys: Vec<solana_sdk::pubkey::Pubkey> = signers
+                .split(',')
+                .map(|s| {
+                    s.trim()
+                        .parse::<solana_sdk::pubkey::Pubkey>()
+                        .unwrap_or_else(|e| {
+                            eprintln!("error: invalid signer pubkey {:?}: {e}", s);
+                            std::process::exit(1);
+                        })
+                })
+                .collect();
+
+            let req = build_multisig_session(&tx, &signer_pubkeys, threshold, &description, &cluster)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+
+            let json = req.to_json().unwrap_or_else(|e| {
+                eprintln!("error: serialise: {e}");
+                std::process::exit(1);
+            });
+            std::fs::write(&out, &json).unwrap_or_else(|e| {
+                eprintln!("error: cannot write {:?}: {e}", out);
+                std::process::exit(1);
+            });
+
+            eprintln!("[airsign] multisign init: round-1 request written to {:?}", out);
+            eprintln!(
+                "[airsign]   signers: {} | threshold: {}/{} | cluster: {}",
+                signer_pubkeys.len(),
+                threshold,
+                signer_pubkeys.len(),
+                cluster
+            );
+            eprintln!("[airsign]   next step: airsign send {:?}", out);
+        }
+
+        MultisignCommands::Sign {
+            request_file,
+            keypair,
+            out,
+        } => {
+            let req_bytes = std::fs::read(&request_file).unwrap_or_else(|e| {
+                eprintln!("error: cannot read {:?}: {e}", request_file);
+                std::process::exit(1);
+            });
+            let req = MultiSignRequest::from_json(&req_bytes).unwrap_or_else(|e| {
+                eprintln!("error: {:?} is not a valid MultiSignRequest: {e}", request_file);
+                std::process::exit(1);
+            });
+
+            // Load keypair
+            let kp_text = std::fs::read_to_string(&keypair).unwrap_or_else(|e| {
+                eprintln!("error: cannot read keypair {:?}: {e}", keypair);
+                std::process::exit(1);
+            });
+            let kp_bytes: Vec<u8> = serde_json::from_str(&kp_text).unwrap_or_else(|e| {
+                eprintln!("error: {:?} is not a valid Solana keypair JSON: {e}", keypair);
+                std::process::exit(1);
+            });
+
+            let ms = MultiSigner::from_bytes(&kp_bytes).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+
+            eprintln!(
+                "[airsign] multisign sign: round {} | signer {} | threshold {}/{}",
+                req.round,
+                ms.pubkey(),
+                req.threshold,
+                req.signers.len()
+            );
+            if !req.description.is_empty() {
+                eprintln!("[airsign]   description: {}", req.description);
+            }
+
+            let resp = ms.sign_multi_request(&req).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+
+            let json = resp.to_json().unwrap_or_else(|e| {
+                eprintln!("error: serialise: {e}");
+                std::process::exit(1);
+            });
+            std::fs::write(&out, &json).unwrap_or_else(|e| {
+                eprintln!("error: cannot write {:?}: {e}", out);
+                std::process::exit(1);
+            });
+
+            if resp.complete {
+                eprintln!("[airsign] ✓ threshold met — session COMPLETE");
+                eprintln!("[airsign]   signed_transaction_b64 ready for broadcast");
+            } else {
+                eprintln!(
+                    "[airsign]   {}/{} signatures collected — session ongoing",
+                    resp.partial_sigs.len(),
+                    req.threshold
+                );
+            }
+            eprintln!("[airsign]   response written to {:?}", out);
+            eprintln!("[airsign]   next step: airsign send {:?}", out);
+        }
+
+        MultisignCommands::Next {
+            response_file,
+            request,
+            out,
+        } => {
+            let resp_bytes = std::fs::read(&response_file).unwrap_or_else(|e| {
+                eprintln!("error: cannot read {:?}: {e}", response_file);
+                std::process::exit(1);
+            });
+            let resp = MultiSignResponse::from_json(&resp_bytes).unwrap_or_else(|e| {
+                eprintln!("error: {:?} is not a valid MultiSignResponse: {e}", response_file);
+                std::process::exit(1);
+            });
+
+            if resp.complete {
+                eprintln!("[airsign] multisign next: threshold already met — no further rounds needed.");
+                eprintln!("[airsign]   decode signed_transaction_b64 from {:?} and broadcast.", response_file);
+                std::process::exit(0);
+            }
+
+            let orig_bytes = std::fs::read(&request).unwrap_or_else(|e| {
+                eprintln!("error: cannot read {:?}: {e}", request);
+                std::process::exit(1);
+            });
+            let orig_req = MultiSignRequest::from_json(&orig_bytes).unwrap_or_else(|e| {
+                eprintln!("error: {:?} is not a valid MultiSignRequest: {e}", request);
+                std::process::exit(1);
+            });
+
+            let next_req = advance_round_from(&resp, &orig_req).unwrap_or_else(|| {
+                eprintln!("[airsign] multisign next: session already complete.");
+                std::process::exit(0);
+            });
+
+            let json = next_req.to_json().unwrap_or_else(|e| {
+                eprintln!("error: serialise: {e}");
+                std::process::exit(1);
+            });
+            std::fs::write(&out, &json).unwrap_or_else(|e| {
+                eprintln!("error: cannot write {:?}: {e}", out);
+                std::process::exit(1);
+            });
+
+            eprintln!(
+                "[airsign] multisign next: round-{} request written to {:?}",
+                next_req.round, out
+            );
+            eprintln!(
+                "[airsign]   partial sigs so far: {}/{}",
+                next_req.partial_sigs.len(),
+                next_req.threshold
+            );
+            eprintln!("[airsign]   next step: airsign send {:?}", out);
+        }
     }
 }
 

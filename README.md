@@ -184,10 +184,67 @@ The generated `pkg/` directory can be imported directly into any JavaScript/Type
 | Versioned sign envelopes (v1) | ✅ Done | `SignRequest::version` field |
 | `airsign sign` CLI subcommand | ✅ Done | `airsign sign <req.json> --keypair <path> [--yes]` |
 | Password hardening (Argon2id tuning) | 🔜 Next | Increase memory cost for mainnet use; configurable via `--argon2-mem` |
-| Multi-signature support | 🔜 Planned | Allow M-of-N signers via sequential QR rounds |
+| Multi-signature support | ✅ Done | M-of-N sequential QR rounds via `airsign multisign init/sign/next` |
 | Hardware-backed key storage | 🔜 Planned | Optionally store keypair in OS keychain / TPM |
 | External security audit | 🔜 Planned | Independent review of crypto and protocol before v1.0.0 release |
 | `crates.io` publish | 🔜 Planned | After audit sign-off |
+
+---
+
+## M-of-N Multi-Signature Workflow
+
+AirSign supports M-of-N sequential multi-signature sessions.  Each round
+travels through the standard encrypted QR channel — no signers need to be
+in the same room or online at the same time.
+
+```
+ ┌──────────────────────────────────────────────────────────────────────┐
+ │                       ONLINE MACHINE                                 │
+ │  airsign multisign init tx.bin                                       │
+ │    --signers A,B,C --threshold 2 --out round1.json                   │
+ │  airsign send round1.json                                            │
+ └────────────────────────────┬─────────────────────────────────────────┘
+          QR stream (encrypted)│
+                               ▼
+ ┌──────────────────────────────────────────────────────────────────────┐
+ │               AIR-GAPPED MACHINE — Signer A                         │
+ │  airsign recv round1.json                                            │
+ │  airsign multisign sign round1.json --keypair id.json --out resp1.json│
+ │  airsign send resp1.json                                             │
+ └────────────────────────────┬─────────────────────────────────────────┘
+          QR stream (encrypted)│
+                               ▼
+ ┌──────────────────────────────────────────────────────────────────────┐
+ │                       ONLINE MACHINE                                 │
+ │  airsign recv resp1.json                                             │
+ │  airsign multisign next resp1.json --request round1.json             │
+ │    --out round2.json                                                 │
+ │  airsign send round2.json                                            │
+ └────────────────────────────┬─────────────────────────────────────────┘
+          QR stream (encrypted)│
+                               ▼
+ ┌──────────────────────────────────────────────────────────────────────┐
+ │               AIR-GAPPED MACHINE — Signer B                         │
+ │  airsign recv round2.json                                            │
+ │  airsign multisign sign round2.json --keypair id.json --out resp2.json│
+ │    → complete=true (threshold met)                                   │
+ │  airsign send resp2.json                                             │
+ └────────────────────────────┬─────────────────────────────────────────┘
+          QR stream (encrypted)│
+                               ▼
+ ┌──────────────────────────────────────────────────────────────────────┐
+ │                       ONLINE MACHINE                                 │
+ │  airsign recv resp2.json                                             │
+ │  airsign broadcast resp2.json --cluster mainnet-beta                 │
+ └──────────────────────────────────────────────────────────────────────┘
+```
+
+**Security properties:**
+
+- No private key material ever crosses the air gap — only public Ed25519 signature bytes travel in the response.
+- Each signer verifies all prior partial signatures before adding its own (chain-of-custody check).
+- A 32-byte random nonce embedded at session creation prevents cross-session replay attacks.
+- Each round locks the expected signer pubkey; presenting the wrong keypair is rejected immediately.
 
 ---
 

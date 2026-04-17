@@ -16,10 +16,12 @@ afterimage-core    = { workspace = true }
 afterimage-optical = { workspace = true }
 afterimage-solana  = { path = "../afterimage-solana" }
 
-clap       = { workspace = true }
-rpassword  = { workspace = true }
-indicatif  = { workspace = true }
-serde_json = { workspace = true }
+clap        = { workspace = true }
+rpassword   = { workspace = true }
+indicatif   = { workspace = true }
+serde_json  = { workspace = true }
+solana-sdk  = { workspace = true }
+bincode     = { workspace = true }
 
 [features]
 default = ["display", "camera"]
