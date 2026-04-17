@@ -9,8 +9,9 @@
 //! ```no_run
 //! use afterimage_solana::broadcaster::Broadcaster;
 //!
+//! let response_json: &[u8] = b"{}"; // replace with real SignResponse JSON
 //! let b = Broadcaster::devnet();
-//! let sig = b.broadcast_response_json(response_json_bytes).unwrap();
+//! let sig = b.broadcast_response_json(response_json).unwrap();
 //! println!("https://explorer.solana.com/tx/{sig}?cluster=devnet");
 //! ```
 
@@ -19,9 +20,11 @@ use solana_sdk::commitment_config::CommitmentConfig;
 
 use crate::{error::AirSignError, response::SignResponse};
 
-/// Cluster presets.
+/// Solana devnet RPC endpoint.
 pub const DEVNET_URL: &str = "https://api.devnet.solana.com";
+/// Solana mainnet-beta RPC endpoint.
 pub const MAINNET_URL: &str = "https://api.mainnet-beta.solana.com";
+/// Solana testnet RPC endpoint.
 pub const TESTNET_URL: &str = "https://api.testnet.solana.com";
 
 /// Submits signed Solana transactions to an RPC endpoint.
