@@ -91,7 +91,7 @@ pub enum ProtocolError {
     },
 
     /// Protocol version not supported by this implementation.
-    #[error("Unknown protocol version {0}; this build supports versions 1 and 2")]
+    #[error("Unknown protocol version {0}; this build supports versions 1, 2, and 3")]
     UnknownVersion(u8),
 
     /// METADATA frame is truncated.

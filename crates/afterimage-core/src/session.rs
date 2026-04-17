@@ -8,7 +8,7 @@
 //! raw byte slices.  The optical layer (QR codes, camera) sits above this.
 
 use crate::{
-    crypto::CryptoLayer,
+    crypto::{Argon2Params, CryptoLayer},
     error::AfterImageError,
     fountain::{LTDecoder, LTEncoder, BLOCK_SIZE, HEADER_SIZE},
     protocol::{MetadataFrame, METADATA_INTERVAL},
@@ -86,6 +86,47 @@ impl SendSession {
         let k = encoder.k as u32;
 
         let metadata = MetadataFrame::new_v2(k, original_len, filename);
+
+        Ok(Self {
+            encoder,
+            metadata,
+            frame_count: 0,
+            limit: None,
+            done: false,
+        })
+    }
+
+    /// Create a new send session with custom Argon2id parameters.
+    ///
+    /// `data`     — raw plaintext bytes to transfer  
+    /// `filename` — cleartext filename embedded in the METADATA frame  
+    /// `password` — Argon2id encryption password  
+    /// `params`   — Argon2id key-derivation parameters (embedded in a v3 METADATA frame)
+    ///
+    /// The Argon2 parameters are written into the 85-byte v3 METADATA frame so
+    /// the receiver can reconstruct the encryption key without any out-of-band
+    /// configuration.  Use `--argon2-mem` / `--argon2-iter` on the CLI.
+    #[cfg(feature = "argon2")]
+    pub fn new_with_argon2_params(
+        data: &[u8],
+        filename: &str,
+        password: &str,
+        params: Argon2Params,
+    ) -> Result<Self, AfterImageError> {
+        let original_len = data.len() as u32;
+
+        #[cfg(feature = "std")]
+        let compressed = crate::crypto::compress::compress(data);
+        #[cfg(not(feature = "std"))]
+        let compressed = data.to_vec();
+
+        let ciphertext = CryptoLayer::encrypt_with_params(&compressed, password, &params)?;
+
+        let encoder = LTEncoder::new(&ciphertext)?;
+        let k = encoder.k as u32;
+
+        let metadata =
+            MetadataFrame::new_v3(k, original_len, filename, params.m_cost, params.t_cost);
 
         Ok(Self {
             encoder,
@@ -238,8 +279,24 @@ impl RecvSession {
             .map(|m| m.version)
             .unwrap_or(2);
 
+        // 3. Build Argon2 params — for v3 read from the embedded frame fields
+        let argon2_params = if version == 3 {
+            if let Some(ref meta) = self.metadata {
+                Argon2Params {
+                    m_cost: meta.argon2_m_cost,
+                    t_cost: meta.argon2_t_cost,
+                    p_cost: crate::crypto::ARGON2_P_COST,
+                }
+            } else {
+                Argon2Params::default()
+            }
+        } else {
+            Argon2Params::default()
+        };
+
         // 3. Decrypt
-        let compressed = CryptoLayer::decrypt(&ciphertext, &self.password, version)?;
+        let compressed =
+            CryptoLayer::decrypt_with_params(&ciphertext, &self.password, version, &argon2_params)?;
 
         // 4. Decompress
         #[cfg(feature = "std")]
@@ -299,5 +356,47 @@ mod tests {
         assert!(recv.is_complete(), "session not complete; progress={:.1}%", recv.progress() * 100.0);
         let recovered = recv.get_data().unwrap();
         assert_eq!(recovered, data);
+    }
+
+    /// v3 session: custom Argon2 params embedded in frame, recovered automatically.
+    #[test]
+    fn send_recv_v3_custom_argon2_params() {
+        let data = make_data(1024);
+        let params = Argon2Params { m_cost: 8_192, t_cost: 1, p_cost: 1 };
+
+        let mut send =
+            SendSession::new_with_argon2_params(&data, "v3test.bin", PASSWORD, params).unwrap();
+
+        // Verify the METADATA frame is v3
+        let first_frame = send.next_frame().unwrap();
+        assert!(
+            MetadataFrame::is_metadata(&first_frame),
+            "first frame must be METADATA"
+        );
+        let meta = MetadataFrame::from_bytes(&first_frame).unwrap();
+        assert_eq!(meta.version, 3, "session must emit v3 frames");
+        assert_eq!(meta.argon2_m_cost, 8_192);
+        assert_eq!(meta.argon2_t_cost, 1);
+
+        // Full roundtrip — RecvSession reads params from the v3 frame
+        let mut send2 =
+            SendSession::new_with_argon2_params(&data, "v3test.bin", PASSWORD, params).unwrap();
+        let mut recv = RecvSession::new(PASSWORD);
+        let limit = (send2.recommended_droplet_count() * 4) as u32 + 200;
+        send2.set_limit(limit);
+        while let Some(frame) = send2.next_frame() {
+            if recv.ingest_frame(&frame).unwrap() {
+                break;
+            }
+        }
+        assert!(recv.is_complete());
+        let recovered = recv.get_data().unwrap();
+        assert_eq!(recovered, data, "v3 roundtrip data mismatch");
+    }
+
+    /// v2 sessions (default params) must still decode correctly after the v3 changes.
+    #[test]
+    fn v2_backward_compat_roundtrip() {
+        roundtrip_check(make_data(2048));
     }
 }

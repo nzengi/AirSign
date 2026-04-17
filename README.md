@@ -160,6 +160,20 @@ The generated `pkg/` directory can be imported directly into any JavaScript/Type
 
 ---
 
+## Changelog
+
+### v2.0.0 — Protocol v3 + Configurable Argon2id
+
+- **Protocol v3 frame** (85 bytes): embeds `argon2_m_cost` and `argon2_t_cost`
+  directly in the METADATA frame so receivers never need out-of-band KDF config.
+- **`SendSession::new_with_argon2_params`** — create a v3 session with custom
+  Argon2id parameters.
+- **`RecvSession`** auto-reads Argon2 params from the v3 METADATA frame.
+- **CLI `airsign send`** gains `--argon2-mem <KiB>` and `--argon2-iter <N>` flags
+  (defaults: 64 MiB / 3 iterations — OWASP 2024 minimums).
+- **`Argon2Params`** and `META_SIZE_V2` / `META_SIZE_V3` are now public exports.
+- Full backward compatibility: v1 and v2 frames decode unchanged.
+
 ## Roadmap
 
 | Milestone | Status | Notes |

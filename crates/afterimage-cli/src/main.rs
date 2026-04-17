@@ -17,7 +17,10 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 
-use afterimage_core::session::{RecvSession, SendSession};
+use afterimage_core::{
+    crypto::Argon2Params,
+    session::{RecvSession, SendSession},
+};
 use afterimage_solana::{
     broadcaster::Broadcaster,
     signer::{AirSigner, summarize_request, default_nonce_store_path},
@@ -56,6 +59,18 @@ enum Commands {
         /// Password (prompted securely if omitted).
         #[arg(long, env = "AFTERIMAGE_PASSWORD")]
         password: Option<String>,
+
+        /// Argon2id memory cost in KiB (default: 65536 = 64 MiB, OWASP 2024 minimum).
+        /// Higher values are slower but harder to brute-force.
+        /// Must match the value used on the receiving side (embedded in the v3 frame
+        /// automatically — the receiver reads it back without extra flags).
+        #[arg(long, default_value_t = 65_536, value_name = "KiB")]
+        argon2_mem: u32,
+
+        /// Argon2id iteration (time) cost (default: 3).
+        /// Higher values are slower but harder to brute-force.
+        #[arg(long, default_value_t = 3, value_name = "N")]
+        argon2_iter: u32,
     },
 
     /// Receive and decrypt a file from the camera QR stream.
@@ -140,7 +155,9 @@ fn main() {
             fps,
             window_size,
             password,
-        } => cmd_send(file, fps, window_size, password),
+            argon2_mem,
+            argon2_iter,
+        } => cmd_send(file, fps, window_size, password, argon2_mem, argon2_iter),
 
         Commands::Recv {
             output,
@@ -281,7 +298,14 @@ fn cmd_sign(
 
 // ─── send ─────────────────────────────────────────────────────────────────────
 
-fn cmd_send(file: PathBuf, fps: u32, window_size: usize, password: Option<String>) {
+fn cmd_send(
+    file: PathBuf,
+    fps: u32,
+    window_size: usize,
+    password: Option<String>,
+    argon2_mem: u32,
+    argon2_iter: u32,
+) {
     let data = std::fs::read(&file).unwrap_or_else(|e| {
         eprintln!("error: cannot read {:?}: {e}", file);
         std::process::exit(1);
@@ -294,16 +318,27 @@ fn cmd_send(file: PathBuf, fps: u32, window_size: usize, password: Option<String
         .and_then(|n| n.to_str())
         .unwrap_or("data.bin");
 
-    let mut session = SendSession::new(&data, filename, &password).unwrap_or_else(|e| {
-        eprintln!("error: {e}");
-        std::process::exit(1);
-    });
+    // Build Argon2 params — always emit a v3 frame so the receiver can
+    // reconstruct the key with the correct parameters automatically.
+    let argon2_params = Argon2Params {
+        m_cost: argon2_mem,
+        t_cost: argon2_iter,
+        p_cost: afterimage_core::crypto::ARGON2_P_COST,
+    };
+
+    let mut session =
+        SendSession::new_with_argon2_params(&data, filename, &password, argon2_params)
+            .unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
 
     let frame_ms = 1000 / fps.max(1);
     let recommended = session.recommended_droplet_count();
 
     eprintln!(
-        "[afterimage] send: {} bytes | ~{} droplets recommended | {fps} fps",
+        "[afterimage] send: {} bytes | ~{} droplets recommended | {fps} fps | \
+         argon2 m={argon2_mem} KiB t={argon2_iter}",
         data.len(),
         recommended
     );

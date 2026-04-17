@@ -23,8 +23,11 @@ pub mod protocol;
 pub mod session;
 
 // Re-export the most commonly used types at the crate root
-pub use crypto::{blake3_digest, blake3_mac, CryptoLayer};
+pub use crypto::{blake3_digest, blake3_mac, Argon2Params, CryptoLayer};
 pub use error::{AfterImageError, CryptoError, FountainError, ProtocolError};
 pub use fountain::{LTDecoder, LTEncoder, RobustSoliton, BLOCK_SIZE, HEADER_SIZE};
-pub use protocol::{MetadataFrame, CURRENT_VERSION, MAGIC, META_SIZE, METADATA_INTERVAL};
+pub use protocol::{
+    MetadataFrame, CURRENT_VERSION, MAGIC, META_SIZE, META_SIZE_V2, META_SIZE_V3,
+    METADATA_INTERVAL,
+};
 pub use session::{RecvSession, SendSession};

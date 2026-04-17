@@ -5,7 +5,7 @@
 //! # Security design
 //!
 //! * **Argon2id** (RFC 9106, OWASP 2024): memory-hard KDF resistant to GPU/ASIC
-//!   brute-force attacks. Parameters: m=65536 KiB, t=3, p=4.
+//!   brute-force attacks. Default parameters: m=65536 KiB, t=3, p=4.
 //! * **ChaCha20-Poly1305**: 256-bit authenticated encryption (RFC 8439).
 //!   Every `encrypt()` call uses a fresh random 16-byte salt and 12-byte nonce,
 //!   so the same password + plaintext pair always yields different ciphertext.
@@ -15,14 +15,15 @@
 //!   plaintext is prepended before encryption, enabling fast pre-auth data
 //!   integrity checks at the application layer without breaking AEAD semantics.
 //!
-//! # Wire format (v2 — Argon2id)
+//! # Wire format (v2/v3 — Argon2id)
 //!
 //! ```text
 //! salt (16 B) || nonce (12 B) || ciphertext+tag (N+16 B)
 //! ```
 //!
-//! The protocol-version byte lives in the METADATA frame, not here.
-//! Protocol v1 (Python compat) uses PBKDF2-SHA256 with the same binary layout.
+//! The protocol-version byte and Argon2id parameters live in the METADATA frame,
+//! not here.  Protocol v1 (Python compat) uses PBKDF2-SHA256 with the same binary
+//! layout.
 
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -48,19 +49,54 @@ pub const TAG_LEN: usize = 16;
 /// Minimum blob length: salt + nonce + tag (zero-length plaintext).
 pub const MIN_BLOB_LEN: usize = SALT_LEN + NONCE_LEN + TAG_LEN;
 
-// ─── Argon2id parameters (OWASP 2024 minimum) ────────────────────────────────
+// ─── Argon2id default parameters (OWASP 2024 minimum) ────────────────────────
 
-/// Memory cost in KiB — 64 MiB.
+/// Default memory cost in KiB — 64 MiB.
 pub const ARGON2_M_COST: u32 = 65_536;
-/// Time (iteration) cost.
+/// Default time (iteration) cost.
 pub const ARGON2_T_COST: u32 = 3;
-/// Degree of parallelism.
+/// Default degree of parallelism.
 pub const ARGON2_P_COST: u32 = 4;
 
 // ─── PBKDF2 parameters (v1 / Python-compat) ──────────────────────────────────
 
 /// PBKDF2-SHA256 iterations used by the Python v1 implementation.
 pub const PBKDF2_ITERATIONS: u32 = 600_000;
+
+// ─── Argon2id parameter set ───────────────────────────────────────────────────
+
+/// Argon2id key-derivation parameters.
+///
+/// Both the sender and receiver must agree on these values; they are embedded
+/// in the METADATA frame (protocol v3+) so the receiver can reconstruct the
+/// exact same key without out-of-band configuration.
+///
+/// # Example — mainnet hardened settings
+/// ```
+/// use afterimage_core::crypto::Argon2Params;
+///
+/// let params = Argon2Params { m_cost: 131_072, t_cost: 4, p_cost: 4 };
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Argon2Params {
+    /// Memory cost in KiB (must be ≥ 8 × `p_cost`). Default: 65 536 (64 MiB).
+    pub m_cost: u32,
+    /// Time (iteration) cost (must be ≥ 1). Default: 3.
+    pub t_cost: u32,
+    /// Degree of parallelism (must be ≥ 1). Default: 4.
+    pub p_cost: u32,
+}
+
+impl Default for Argon2Params {
+    /// OWASP 2024 minimum: m=64 MiB, t=3, p=4.
+    fn default() -> Self {
+        Self {
+            m_cost: ARGON2_M_COST,
+            t_cost: ARGON2_T_COST,
+            p_cost: ARGON2_P_COST,
+        }
+    }
+}
 
 // ─── Zeroizing key wrapper ───────────────────────────────────────────────────
 
@@ -78,7 +114,42 @@ pub struct CryptoLayer;
 impl CryptoLayer {
     // ── Key derivation ────────────────────────────────────────────────────
 
-    /// Derive a 256-bit key from `password` and `salt` using **Argon2id**.
+    /// Derive a 256-bit key from `password` and `salt` using **Argon2id**
+    /// with a custom [`Argon2Params`].
+    ///
+    /// # Errors
+    /// Returns [`CryptoError::InvalidPassword`] if the password is empty.
+    /// Returns [`CryptoError::KeyDerivation`] on Argon2 parameter errors.
+    #[cfg(feature = "argon2")]
+    pub fn derive_key_argon2id_with_params(
+        password: &str,
+        salt: &[u8; SALT_LEN],
+        params: &Argon2Params,
+    ) -> Result<[u8; KEY_LEN], CryptoError> {
+        if password.is_empty() {
+            return Err(CryptoError::InvalidPassword("password must not be empty"));
+        }
+
+        let ap = Params::new(
+            params.m_cost,
+            params.t_cost,
+            params.p_cost,
+            Some(KEY_LEN),
+        )
+        .map_err(|e| CryptoError::KeyDerivation(e.to_string()))?;
+
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, ap);
+
+        let mut key_bytes = [0u8; KEY_LEN];
+        argon2
+            .hash_password_into(password.as_bytes(), salt, &mut key_bytes)
+            .map_err(|e| CryptoError::KeyDerivation(e.to_string()))?;
+
+        Ok(key_bytes)
+    }
+
+    /// Derive a 256-bit key from `password` and `salt` using **Argon2id**
+    /// with the default OWASP 2024 parameters.
     ///
     /// # Errors
     /// Returns [`CryptoError::InvalidPassword`] if the password is empty.
@@ -88,21 +159,7 @@ impl CryptoLayer {
         password: &str,
         salt: &[u8; SALT_LEN],
     ) -> Result<[u8; KEY_LEN], CryptoError> {
-        if password.is_empty() {
-            return Err(CryptoError::InvalidPassword("password must not be empty"));
-        }
-
-        let params = Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, Some(KEY_LEN))
-            .map_err(|e| CryptoError::KeyDerivation(e.to_string()))?;
-
-        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-
-        let mut key_bytes = [0u8; KEY_LEN];
-        argon2
-            .hash_password_into(password.as_bytes(), salt, &mut key_bytes)
-            .map_err(|e| CryptoError::KeyDerivation(e.to_string()))?;
-
-        Ok(key_bytes)
+        Self::derive_key_argon2id_with_params(password, salt, &Argon2Params::default())
     }
 
     /// Derive a 256-bit key using **PBKDF2-SHA256** (v1 / Python compatibility).
@@ -128,19 +185,22 @@ impl CryptoLayer {
 
     // ── Encrypt ──────────────────────────────────────────────────────────
 
-    /// Compress-then-encrypt `data` with a fresh Argon2id salt and ChaCha20 nonce.
+    /// Encrypt `data` using a fresh Argon2id-derived key (custom [`Argon2Params`])
+    /// and a random ChaCha20-Poly1305 nonce.
     ///
     /// # Wire format
     /// ```text
     /// salt (16 B) || nonce (12 B) || ciphertext+tag (len(data)+16 B)
     /// ```
     ///
-    /// The protocol-version byte lives in the METADATA frame, not the blob.
-    ///
     /// # Errors
     /// See [`CryptoError`].
     #[cfg(feature = "argon2")]
-    pub fn encrypt(data: &[u8], password: &str) -> Result<Vec<u8>, CryptoError> {
+    pub fn encrypt_with_params(
+        data: &[u8],
+        password: &str,
+        params: &Argon2Params,
+    ) -> Result<Vec<u8>, CryptoError> {
         use rand::RngCore;
 
         let mut salt = [0u8; SALT_LEN];
@@ -148,17 +208,13 @@ impl CryptoLayer {
         rand::rng().fill_bytes(&mut salt);
         rand::rng().fill_bytes(&mut nonce_bytes);
 
-        // Derive key — zeroized on drop via DerivedKey wrapper
-        let raw_key = Self::derive_key_argon2id(password, &salt)?;
+        let raw_key = Self::derive_key_argon2id_with_params(password, &salt, params)?;
         let mut derived = DerivedKey(raw_key);
 
         let key = Key::from_slice(&derived.0);
         let cipher = ChaCha20Poly1305::new(key);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        // No AAD needed — Poly1305 tag already provides AEAD authentication.
-        // Keeping the API simple and correct is more important than layering
-        // redundant commitments that break encrypt/decrypt symmetry.
         let ciphertext = cipher
             .encrypt(nonce, data.as_ref())
             .map_err(|_| CryptoError::DecryptionFailed)?;
@@ -173,18 +229,35 @@ impl CryptoLayer {
         Ok(blob)
     }
 
+    /// Encrypt `data` using default Argon2id parameters.
+    ///
+    /// # Wire format
+    /// ```text
+    /// salt (16 B) || nonce (12 B) || ciphertext+tag (len(data)+16 B)
+    /// ```
+    #[cfg(feature = "argon2")]
+    pub fn encrypt(data: &[u8], password: &str) -> Result<Vec<u8>, CryptoError> {
+        Self::encrypt_with_params(data, password, &Argon2Params::default())
+    }
+
     // ── Decrypt ──────────────────────────────────────────────────────────
 
-    /// Authenticate and decrypt a blob produced by [`Self::encrypt`].
+    /// Authenticate and decrypt a blob, using explicit [`Argon2Params`].
     ///
     /// `version` selects the KDF:
-    /// - `1` → PBKDF2-SHA256 (Python v1 compatibility)
-    /// - `2` → Argon2id (Rust v2 default)
+    /// - `1` → PBKDF2-SHA256 (Python v1 — `params` ignored)
+    /// - `2` → Argon2id default params (params ignored; uses built-in defaults)
+    /// - `3` → Argon2id with the supplied `params` (embedded in the v3 frame)
     ///
     /// # Errors
     /// Returns [`CryptoError::DecryptionFailed`] for wrong password **or** tampered
     /// data — deliberately ambiguous to prevent oracle attacks.
-    pub fn decrypt(blob: &[u8], password: &str, version: u8) -> Result<Vec<u8>, CryptoError> {
+    pub fn decrypt_with_params(
+        blob: &[u8],
+        password: &str,
+        version: u8,
+        params: &Argon2Params,
+    ) -> Result<Vec<u8>, CryptoError> {
         if blob.len() < MIN_BLOB_LEN {
             return Err(CryptoError::BlobTooShort {
                 min: MIN_BLOB_LEN,
@@ -197,11 +270,12 @@ impl CryptoLayer {
             blob[SALT_LEN..SALT_LEN + NONCE_LEN].try_into().unwrap();
         let ciphertext = &blob[SALT_LEN + NONCE_LEN..];
 
-        // Derive key based on protocol version
         let raw_key = match version {
             1 => Self::derive_key_pbkdf2(password, &salt)?,
             #[cfg(feature = "argon2")]
             2 => Self::derive_key_argon2id(password, &salt)?,
+            #[cfg(feature = "argon2")]
+            3 => Self::derive_key_argon2id_with_params(password, &salt, params)?,
             _ => return Err(CryptoError::KeyDerivation(format!("unknown version {version}"))),
         };
         let mut derived = DerivedKey(raw_key);
@@ -210,13 +284,20 @@ impl CryptoLayer {
         let cipher = ChaCha20Poly1305::new(key);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        // Both v1 and v2 use no AAD — Poly1305 tag authenticates the ciphertext.
         let plaintext = cipher
             .decrypt(nonce, ciphertext.as_ref())
             .map_err(|_| CryptoError::DecryptionFailed)?;
 
         derived.zeroize();
         Ok(plaintext)
+    }
+
+    /// Authenticate and decrypt a blob produced by [`Self::encrypt`] or
+    /// [`Self::encrypt_with_params`] — uses default Argon2id params for v2.
+    ///
+    /// For protocol v3 (custom params), prefer [`Self::decrypt_with_params`].
+    pub fn decrypt(blob: &[u8], password: &str, version: u8) -> Result<Vec<u8>, CryptoError> {
+        Self::decrypt_with_params(blob, password, version, &Argon2Params::default())
     }
 
     /// Convenience wrapper: encrypt using the current default (Argon2id, version 2).
@@ -338,6 +419,42 @@ mod tests {
         assert_eq!(d1, d2);
         let d3 = blake3_digest(b"hellO");
         assert_ne!(d1, d3);
+    }
+
+    /// Custom Argon2 params roundtrip — using lower params for test speed.
+    #[test]
+    fn roundtrip_custom_argon2_params() {
+        let params = Argon2Params {
+            m_cost: 8_192, // 8 MiB — faster for tests
+            t_cost: 1,
+            p_cost: 1,
+        };
+        let blob = CryptoLayer::encrypt_with_params(PLAINTEXT, PASSWORD, &params).unwrap();
+        let recovered =
+            CryptoLayer::decrypt_with_params(&blob, PASSWORD, 3, &params).unwrap();
+        assert_eq!(recovered, PLAINTEXT);
+    }
+
+    /// Wrong params must cause decryption failure.
+    #[test]
+    fn wrong_argon2_params_fail() {
+        let params_a = Argon2Params { m_cost: 8_192, t_cost: 1, p_cost: 1 };
+        let params_b = Argon2Params { m_cost: 8_192, t_cost: 2, p_cost: 1 };
+        let blob = CryptoLayer::encrypt_with_params(PLAINTEXT, PASSWORD, &params_a).unwrap();
+        let result = CryptoLayer::decrypt_with_params(&blob, PASSWORD, 3, &params_b);
+        assert!(
+            matches!(result, Err(CryptoError::DecryptionFailed)),
+            "expected DecryptionFailed when params differ"
+        );
+    }
+
+    /// `Argon2Params::default()` must equal the published constants.
+    #[test]
+    fn default_params_match_constants() {
+        let d = Argon2Params::default();
+        assert_eq!(d.m_cost, ARGON2_M_COST);
+        assert_eq!(d.t_cost, ARGON2_T_COST);
+        assert_eq!(d.p_cost, ARGON2_P_COST);
     }
 
     #[cfg(feature = "std")]
