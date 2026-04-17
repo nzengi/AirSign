@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.1.0] — 2026-04-18
+
+### Added
+- **`crates/afterimage-dkg`** — new Rust crate implementing FROST RFC 9591 **Distributed Key Generation** (DKG) without a trusted dealer
+  - `participant` — `dkg_round1`, `dkg_round2`, `dkg_finish` functions; full 3-phase protocol over Ed25519
+  - `coordinator` — stateless helpers for package routing and slot readiness checks
+  - 23 unit tests: configuration validation, 2-of-2 / 2-of-3 / 3-of-5 roundtrips, nonce freshness, key-share uniqueness, group-pubkey consistency, and end-to-end FROST signing with DKG-derived keys
+- **`crates/afterimage-wasm`** — DKG WebAssembly bindings
+  - `WasmDkgParticipant(id, n, t)` → `round1()`, `round2(allR1Json)`, `finish(allR1Json, allR2Json)`
+  - Private state (secret packages) held inside the WASM object and never exposed to JavaScript
+- **`apps/signer-web` — tab 6 "🗝️ Trustless DKG"**
+  - `DkgPage.tsx` — guided 3-round in-browser DKG session demo
+  - Step progress indicator (Setup → Round 1 → Round 2 → Finish)
+  - Shows per-participant public commitments, directed package routing table, and final group public key with consistency check
+
+---
+
 ## [2.0.0] — 2026-04-17
 
 ### Added

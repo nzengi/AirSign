@@ -14,6 +14,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 afterimage-core  = { workspace = true }
 afterimage-frost = { workspace = true }
+afterimage-dkg   = { workspace = true }
 
 wasm-bindgen  = { workspace = true }
 js-sys        = { workspace = true }

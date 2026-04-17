@@ -7,6 +7,7 @@ members = [
     "crates/afterimage-solana",
     "crates/afterimage-wasm",
     "crates/afterimage-frost",
+    "crates/afterimage-dkg",
 ]
 
 [workspace.package]
@@ -90,6 +91,7 @@ hex     = "0.4"
 afterimage-core    = { path = "crates/afterimage-core" }
 afterimage-optical = { path = "crates/afterimage-optical" }
 afterimage-frost   = { path = "crates/afterimage-frost" }
+afterimage-dkg     = { path = "crates/afterimage-dkg" }
 
 [profile.release]
 opt-level     = 3

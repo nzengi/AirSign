@@ -17,6 +17,7 @@ AirSign lets you sign Solana transactions on a device that has *never* touched t
 - [Protocol](#protocol)
 - [M-of-N Multisig](#m-of-n-multisig)
 - [FROST Threshold Signatures](#frost-threshold-signatures)
+- [Trustless DKG](#trustless-dkg)
 - [Ledger Hardware Wallet](#ledger-hardware-wallet)
 - [Cryptography](#cryptography)
 - [CI & Testing](#ci--testing)
@@ -364,6 +365,63 @@ The **❄️ FROST Threshold** tab in the signer-web app (`apps/signer-web`) pro
 - **Nonces are ephemeral** — each Round-1 call generates fresh nonces from OS randomness; nonce reuse is impossible through the API.
 - **The aggregator is untrusted** — it never sees private key material; it only combines public commitments and public shares.
 - **`t = 1` is rejected** — `frost-ed25519` requires `min_signers ≥ 2`; the crate validates this before calling the library.
+
+---
+
+## Trustless DKG
+
+AirSign v2.1 extends the FROST stack with a **Distributed Key Generation (DKG)** protocol that eliminates the need for a trusted dealer entirely.
+
+### Why DKG?
+
+The FROST trusted-dealer model requires one party to generate all key shares and then destroy their copy of the master secret. If that party is dishonest or compromised before deletion, the whole threshold is bypassed. DKG distributes key generation across all participants — no single party ever holds the full secret.
+
+| Property | Trusted Dealer (FROST v2.0) | Trustless DKG (v2.1) |
+|---|---|---|
+| Single point of failure | The dealer | **None** |
+| Secret ever assembled | Once (dealer) | **Never** |
+| Rounds | 1 (offline) | **3 rounds** |
+| Verifiable secret sharing | No | **Yes (Feldman VSS)** |
+| Group pubkey determined by | Dealer | **All participants jointly** |
+
+### Crate: `afterimage-dkg`
+
+```rust
+use afterimage_dkg::participant::{dkg_round1, dkg_round2, dkg_finish};
+
+let r1_1 = dkg_round1(1, 3, 2)?;  // id=1, n=3, t=2
+let r1_2 = dkg_round1(2, 3, 2)?;
+let r1_3 = dkg_round1(3, 3, 2)?;
+let all_r1 = vec![r1_1.clone(), r1_2.clone(), r1_3.clone()];
+
+let r2_1 = dkg_round2(&r1_1, &all_r1)?;
+let r2_2 = dkg_round2(&r1_2, &all_r1)?;
+let r2_3 = dkg_round2(&r1_3, &all_r1)?;
+let all_r2 = vec![r2_1.clone(), r2_2.clone(), r2_3.clone()];
+
+let out = dkg_finish(&r1_1, &r2_1, &all_r1, &all_r2)?;
+// out.group_pubkey_hex  -- same for all participants
+// out.key_package_json  -- private key share; compatible with WasmFrostParticipant
+```
+
+### WASM API
+
+```ts
+const p1 = new WasmDkgParticipant(1, 3, 2);
+const p2 = new WasmDkgParticipant(2, 3, 2);
+const p3 = new WasmDkgParticipant(3, 3, 2);
+
+const r1 = [p1.round1(), p2.round1(), p3.round1()].map(JSON.parse);
+const allR1 = JSON.stringify(r1);
+const r2 = [p1.round2(allR1), p2.round2(allR1), p3.round2(allR1)].map(JSON.parse);
+const allR2 = JSON.stringify(r2);
+
+const out = JSON.parse(p1.finish(allR1, allR2));
+// out.group_pubkey_hex -- Solana-compatible Ed25519 public key
+// out.key_package_json -- pass to WasmFrostParticipant for threshold signing
+```
+
+The **Trustless DKG** tab in the signer-web app runs a full multi-participant DKG session inside the browser with no server required.
 
 ---
 

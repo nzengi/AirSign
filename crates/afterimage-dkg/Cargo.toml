@@ -1,0 +1,16 @@
+[package]
+name        = "afterimage-dkg"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "FROST RFC 9591 Distributed Key Generation (DKG) for AirSign — trustless t-of-n key setup without a trusted dealer"
+
+[dependencies]
+frost-ed25519 = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+thiserror     = { workspace = true }
+hex           = { workspace = true }
+rand_core     = { version = "0.6", features = ["getrandom"] }

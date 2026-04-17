@@ -928,6 +928,146 @@ impl WasmFrostAggregator {
     }
 }
 
+// ─── DKG bindings ─────────────────────────────────────────────────────────────
+
+use afterimage_dkg::participant::{dkg_finish, dkg_round1, dkg_round2};
+use afterimage_dkg::types::{DkgRound1Output, DkgRound2Output};
+
+/// Browser-side DKG participant.
+///
+/// One instance per participant.  The participant's private state (secret
+/// packages) is held inside this object and never exposed to JavaScript.
+///
+/// ```js
+/// const p = new WasmDkgParticipant(1, 3, 2);   // id=1, n=3, t=2
+/// const r1 = JSON.parse(p.round1());             // { identifier, round1_package_json }
+/// // — broadcast r1.round1_package_json to all peers —
+/// // — collect all_r1_json from all participants —
+/// const r2 = JSON.parse(p.round2(all_r1_json));  // { identifier, round2_packages: [...] }
+/// // — route each entry only to its recipient —
+/// // — collect all_r2_json from all participants —
+/// const out = JSON.parse(p.finish(all_r1_json, all_r2_json));
+/// // out.key_package_json  → PRIVATE key share
+/// // out.pubkey_package_json → PUBLIC group key
+/// // out.group_pubkey_hex  → 64-char Solana address hex
+/// ```
+#[wasm_bindgen]
+pub struct WasmDkgParticipant {
+    identifier: u16,
+    n: u16,
+    threshold: u16,
+    /// Serialised Round-1 output from this participant (set after `round1()`).
+    round1_output: Option<DkgRound1Output>,
+    /// Serialised Round-2 output from this participant (set after `round2()`).
+    round2_output: Option<DkgRound2Output>,
+}
+
+#[wasm_bindgen]
+impl WasmDkgParticipant {
+    /// Create a new DKG participant.
+    ///
+    /// * `identifier` — 1-based index (1..=n)
+    /// * `n`          — total participants
+    /// * `threshold`  — minimum signers (2 ≤ t ≤ n)
+    #[wasm_bindgen(constructor)]
+    pub fn new(identifier: u16, n: u16, threshold: u16) -> Result<WasmDkgParticipant, JsValue> {
+        if n < 2 || threshold < 2 || threshold > n {
+            return Err(JsValue::from_str(&format!(
+                "invalid config: n={n}, t={threshold} — require 2 ≤ t ≤ n"
+            )));
+        }
+        Ok(WasmDkgParticipant {
+            identifier,
+            n,
+            threshold,
+            round1_output: None,
+            round2_output: None,
+        })
+    }
+
+    /// **Round 1** — generate commitment and secret package.
+    ///
+    /// Returns a JSON string:
+    /// ```json
+    /// {
+    ///   "identifier": 1,
+    ///   "round1_package_json": "...",   // PUBLIC — broadcast to all
+    ///   "secret_package_json": "..."    // PRIVATE — never leave this device
+    /// }
+    /// ```
+    pub fn round1(&mut self) -> Result<String, JsValue> {
+        let output = dkg_round1(self.identifier, self.n, self.threshold)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let json = serde_json::to_string(&output)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.round1_output = Some(output);
+        Ok(json)
+    }
+
+    /// **Round 2** — process all Round-1 packages and emit directed packages.
+    ///
+    /// * `all_r1_json` — JSON array of **all** participants' Round-1 outputs
+    ///   (including this participant's own).
+    ///
+    /// Returns a JSON string:
+    /// ```json
+    /// {
+    ///   "identifier": 1,
+    ///   "secret_package_json": "...",   // PRIVATE
+    ///   "round2_packages": [
+    ///     { "recipient_identifier": 2, "package_json": "..." },
+    ///     { "recipient_identifier": 3, "package_json": "..." }
+    ///   ]
+    /// }
+    /// ```
+    pub fn round2(&mut self, all_r1_json: &str) -> Result<String, JsValue> {
+        let my_r1 = self
+            .round1_output
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("call round1() first"))?;
+        let all_r1: Vec<DkgRound1Output> = serde_json::from_str(all_r1_json)
+            .map_err(|e| JsValue::from_str(&format!("parse all_r1: {e}")))?;
+        let output = dkg_round2(my_r1, &all_r1)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let json = serde_json::to_string(&output)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.round2_output = Some(output);
+        Ok(json)
+    }
+
+    /// **Finish** — combine all packages to produce the final key material.
+    ///
+    /// * `all_r1_json` — JSON array of all Round-1 outputs (same as passed to `round2`)
+    /// * `all_r2_json` — JSON array of **all** participants' Round-2 outputs
+    ///
+    /// Returns a JSON string:
+    /// ```json
+    /// {
+    ///   "identifier": 1,
+    ///   "key_package_json": "...",      // PRIVATE — this participant's key share
+    ///   "pubkey_package_json": "...",   // PUBLIC  — group public key
+    ///   "group_pubkey_hex": "abc123..."  // 64-char hex
+    /// }
+    /// ```
+    pub fn finish(&self, all_r1_json: &str, all_r2_json: &str) -> Result<String, JsValue> {
+        let my_r1 = self
+            .round1_output
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("call round1() first"))?;
+        let my_r2 = self
+            .round2_output
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("call round2() first"))?;
+        let all_r1: Vec<DkgRound1Output> = serde_json::from_str(all_r1_json)
+            .map_err(|e| JsValue::from_str(&format!("parse all_r1: {e}")))?;
+        let all_r2: Vec<DkgRound2Output> = serde_json::from_str(all_r2_json)
+            .map_err(|e| JsValue::from_str(&format!("parse all_r2: {e}")))?;
+        let output = dkg_finish(my_r1, my_r2, &all_r1, &all_r2)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        serde_json::to_string(&output).map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 /// Minimal Base58 encoder (Bitcoin/Solana alphabet).
