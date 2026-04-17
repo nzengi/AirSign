@@ -160,6 +160,23 @@ The generated `pkg/` directory can be imported directly into any JavaScript/Type
 
 ---
 
+## Roadmap
+
+| Milestone | Status | Notes |
+|---|---|---|
+| AirSign v1 core (sign + broadcast) | ✅ Done | `afterimage-solana` crate |
+| Persistent nonce store (replay protection) | ✅ Done | `~/.airsign/seen_nonces.json` |
+| Terminal tx review + confirmation prompt | ✅ Done | `sign_request_confirmed()` |
+| Versioned sign envelopes (v1) | ✅ Done | `SignRequest::version` field |
+| `airsign sign` CLI subcommand | 🔜 Next | Read request file, prompt, output response file |
+| Password hardening (Argon2id tuning) | 🔜 Next | Increase memory cost for mainnet use; configurable via `--argon2-mem` |
+| Multi-signature support | 🔜 Planned | Allow M-of-N signers via sequential QR rounds |
+| Hardware-backed key storage | 🔜 Planned | Optionally store keypair in OS keychain / TPM |
+| External security audit | 🔜 Planned | Independent review of crypto and protocol before v1.0.0 release |
+| `crates.io` publish | 🔜 Planned | After audit sign-off |
+
+---
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). In short: `cargo fmt`, `cargo clippy -- -D warnings`, tests required for new behaviour.

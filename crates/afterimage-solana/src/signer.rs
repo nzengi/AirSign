@@ -1,15 +1,26 @@
 //! AirSign — air-gapped Ed25519 transaction signer.
 //!
-//! `AirSigner` runs on the **air-gapped machine**.  It:
+//! `AirSigner` runs on the **air-gapped machine**. It:
 //!
 //! 1. Receives a QR stream (via camera or manual PNG import).
 //! 2. Decrypts and deserialises the [`SignRequest`].
-//! 3. Displays the transaction summary for human review.
-//! 4. Signs the transaction message bytes with the loaded keypair.
-//! 5. Encrypts and transmits the [`SignResponse`] back as a QR stream.
+//! 3. Checks the nonce against the persistent nonce store to prevent replay.
+//! 4. Displays the transaction summary for human review.
+//! 5. Signs the transaction message bytes with the loaded keypair.
+//! 6. Persists the nonce so it can never be replayed.
+//! 7. Encrypts and transmits the [`SignResponse`] back as a QR stream.
+
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
-use solana_sdk::{signature::Signer, signer::keypair::Keypair};
+use solana_sdk::{
+    signature::Signer,
+    signer::keypair::Keypair,
+};
+use solana_system_interface::program as system_program;
 
 use afterimage_core::session::{RecvSession, SendSession};
 
@@ -19,22 +30,153 @@ use crate::{
     response::SignResponse,
 };
 
+// ─── Nonce store helpers ──────────────────────────────────────────────────────
+
+/// Returns the default nonce-store path: `~/.airsign/seen_nonces.json`.
+pub fn default_nonce_store_path() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".airsign").join("seen_nonces.json"))
+}
+
+fn load_seen_nonces(path: &Path) -> HashSet<String> {
+    let Ok(data) = std::fs::read(path) else {
+        return HashSet::new();
+    };
+    serde_json::from_slice::<Vec<String>>(&data)
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+}
+
+fn persist_nonce(path: &Path, nonce: &str) -> Result<(), AirSignError> {
+    // Ensure directory exists
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| AirSignError::Io(e.to_string()))?;
+    }
+
+    let mut seen = load_seen_nonces(path);
+    seen.insert(nonce.to_owned());
+
+    let list: Vec<&String> = seen.iter().collect();
+    let json = serde_json::to_vec(&list).map_err(AirSignError::Json)?;
+    std::fs::write(path, &json).map_err(|e| AirSignError::Io(e.to_string()))?;
+    Ok(())
+}
+
+// ─── Transaction summary ──────────────────────────────────────────────────────
+
+/// Parse a `SignRequest` and return a human-readable summary string.
+///
+/// Shown on the air-gapped machine before the user approves signing.
+pub fn summarize_request(req: &SignRequest) -> String {
+    let mut lines: Vec<String> = Vec::new();
+
+    lines.push("┌─ AirSign — Transaction Review ──────────────────────────────┐".into());
+    lines.push(format!("│  Description : {}", truncate(&req.description, 50)));
+    lines.push(format!("│  Cluster     : {}", if req.cluster.is_empty() { "unknown" } else { &req.cluster }));
+    lines.push(format!("│  Nonce       : {}", truncate(&req.nonce, 16)));
+    lines.push(format!("│  Signer      : {}", truncate(&req.signer_pubkey, 44)));
+
+    match req.decode_transaction() {
+        Ok(tx) => {
+            lines.push(format!("│  Instructions: {}", tx.message.instructions.len()));
+            for (i, ix) in tx.message.instructions.iter().enumerate() {
+                let prog_idx = ix.program_id_index as usize;
+                let prog = tx.message.account_keys
+                    .get(prog_idx)
+                    .map(|k| k.to_string())
+                    .unwrap_or_else(|| "unknown".into());
+
+                // Try to decode System Program transfer
+                if tx.message.account_keys.get(prog_idx).map(|k| *k == system_program::id()).unwrap_or(false) {
+                    if let Ok(sys_ix) = bincode::deserialize::<solana_system_interface::instruction::SystemInstruction>(&ix.data) {
+                        match sys_ix {
+                            solana_system_interface::instruction::SystemInstruction::Transfer { lamports } => {
+                                let from = ix.accounts.first()
+                                    .and_then(|&ai| tx.message.account_keys.get(ai as usize))
+                                    .map(|k| truncate(&k.to_string(), 22))
+                                    .unwrap_or_else(|| "?".into());
+                                let to = ix.accounts.get(1)
+                                    .and_then(|&ai| tx.message.account_keys.get(ai as usize))
+                                    .map(|k| truncate(&k.to_string(), 22))
+                                    .unwrap_or_else(|| "?".into());
+                                let sol = lamports as f64 / 1_000_000_000.0;
+                                lines.push(format!("│  [{i}] SOL Transfer: {sol:.9} SOL"));
+                                lines.push(format!("│      From : {from}"));
+                                lines.push(format!("│      To   : {to}"));
+                                continue;
+                            }
+                            other => {
+                                lines.push(format!("│  [{i}] System IX: {other:?}"));
+                                continue;
+                            }
+                        }
+                    }
+                }
+
+                lines.push(format!("│  [{i}] Program: {}", truncate(&prog, 44)));
+            }
+        }
+        Err(e) => {
+            lines.push(format!("│  ⚠ Could not parse transaction: {e}"));
+        }
+    }
+
+    lines.push("│".into());
+    lines.push("│  ⚠  Verify the above carefully before approving.".into());
+    lines.push("└──────────────────────────────────────────────────────────────┘".into());
+    lines.join("\n")
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_owned()
+    } else {
+        format!("{}…", &s[..max.saturating_sub(1)])
+    }
+}
+
+// ─── AirSigner ────────────────────────────────────────────────────────────────
+
 /// Air-gapped signer holding a single Ed25519 keypair.
 pub struct AirSigner {
     keypair: Keypair,
     /// AfterImage transfer password shared between both machines.
     password: String,
+    /// Optional path to the persistent nonce store.
+    /// When set, seen nonces are saved to disk and replays are rejected.
+    nonce_store: Option<PathBuf>,
 }
 
 impl AirSigner {
     /// Load from a byte slice (bincode-serialised `Keypair`).
     pub fn from_bytes(keypair_bytes: &[u8], password: impl Into<String>) -> Self {
-        let keypair = Keypair::try_from(keypair_bytes)
-            .expect("invalid keypair bytes");
+        let keypair = Keypair::try_from(keypair_bytes).expect("invalid keypair bytes");
         Self {
             keypair,
             password: password.into(),
+            nonce_store: None,
         }
+    }
+
+    /// Enable persistent nonce tracking at the given path.
+    ///
+    /// Once enabled, every successfully signed nonce is written to the file.
+    /// Any attempt to re-use a nonce returns [`AirSignError::ReplayDetected`].
+    #[must_use]
+    pub fn with_nonce_store(mut self, path: impl Into<PathBuf>) -> Self {
+        self.nonce_store = Some(path.into());
+        self
+    }
+
+    /// Enable nonce tracking at the default path (`~/.airsign/seen_nonces.json`).
+    ///
+    /// Returns `self` unchanged if the home directory cannot be determined.
+    #[must_use]
+    pub fn with_default_nonce_store(mut self) -> Self {
+        self.nonce_store = default_nonce_store_path();
+        self
     }
 
     /// Return the public key of the loaded keypair.
@@ -44,8 +186,13 @@ impl AirSigner {
 
     /// Process a raw `SignRequest` payload (decrypted JSON bytes).
     ///
-    /// Validates the nonce, signs the transaction, and returns a
-    /// [`SignResponse`] ready for transmission.
+    /// - Validates that the request targets this signer's public key.
+    /// - Checks the nonce against the persistent store (if enabled).
+    /// - Signs the transaction and persists the nonce.
+    ///
+    /// Returns a [`SignResponse`] ready for transmission.
+    /// Does **not** prompt the user — call [`AirSigner::sign_request_confirmed`]
+    /// for interactive use.
     pub fn sign_request(&self, request_json: &[u8]) -> Result<SignResponse, AirSignError> {
         let req = SignRequest::from_json(request_json)
             .map_err(|e| AirSignError::InvalidRequest(e.to_string()))?;
@@ -57,6 +204,14 @@ impl AirSigner {
                 "request targets {}, but signer is {}",
                 req.signer_pubkey, expected_pubkey
             )));
+        }
+
+        // Replay-attack check
+        if let Some(ref store) = self.nonce_store {
+            let seen = load_seen_nonces(store);
+            if seen.contains(&req.nonce) {
+                return Err(AirSignError::ReplayDetected(req.nonce.clone()));
+            }
         }
 
         // Decode the unsigned transaction
@@ -91,20 +246,52 @@ impl AirSigner {
 
         let response = SignResponse {
             version: 1,
-            nonce: req.nonce,
+            nonce: req.nonce.clone(),
             signer_pubkey: expected_pubkey,
             signature_b64: STANDARD.encode(signature.as_ref()),
             signed_transaction_b64: STANDARD.encode(&signed_tx_bytes),
         };
 
+        // Persist nonce AFTER successful signing
+        if let Some(ref store) = self.nonce_store {
+            persist_nonce(store, &req.nonce)?;
+        }
+
         Ok(response)
     }
 
-    /// High-level helper: receive a sign request via AfterImage QR stream,
-    /// sign it, and return the encrypted response payload ready for sending.
+    /// Interactive variant: prints the transaction summary to stderr,
+    /// prompts the user to confirm, then calls [`sign_request`].
     ///
-    /// `ingest_frames` is a closure that feeds raw QR frames into a
-    /// [`RecvSession`] until it returns `true` (complete).
+    /// Returns [`AirSignError::UserAborted`] if the user types anything
+    /// other than `yes` / `y`.
+    pub fn sign_request_confirmed(&self, request_json: &[u8]) -> Result<SignResponse, AirSignError> {
+        let req = SignRequest::from_json(request_json)
+            .map_err(|e| AirSignError::InvalidRequest(e.to_string()))?;
+
+        // Display the summary
+        let summary = summarize_request(&req);
+        eprintln!("{summary}");
+        eprint!("\nType 'yes' to sign, anything else to abort: ");
+
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| AirSignError::Io(e.to_string()))?;
+
+        let answer = input.trim().to_lowercase();
+        if answer != "yes" && answer != "y" {
+            return Err(AirSignError::UserAborted);
+        }
+
+        // Re-serialise and call sign_request (to reuse all validation)
+        let json = req.to_json()?;
+        self.sign_request(&json)
+    }
+
+    /// High-level helper: receive a sign request via AfterImage QR stream,
+    /// show the summary, prompt for confirmation, sign, and return the
+    /// encrypted response payload ready for sending.
     pub fn receive_sign_and_encode<F>(
         &self,
         ingest_frames: F,
@@ -116,14 +303,15 @@ impl AirSigner {
         ingest_frames(&mut recv)?;
 
         let request_json = recv.get_data()?;
-        let response = self.sign_request(&request_json)?;
+        let response = self.sign_request_confirmed(&request_json)?;
 
         let response_json = response.to_json()?;
-
         let send = SendSession::new(&response_json, "airsign-response.json", &self.password)?;
         Ok(send)
     }
 }
+
+// ─── Online-machine helper ────────────────────────────────────────────────────
 
 /// Online-machine helper: build a `SignRequest` and wrap it in a `SendSession`.
 pub fn build_send_session(
@@ -169,12 +357,16 @@ mod tests {
     use solana_sdk::{
         message::Message,
         pubkey::Pubkey,
-        system_instruction,
         signer::keypair::Keypair,
     };
+    use solana_system_interface::instruction as system_ix;
 
-    fn make_transfer_tx(from: &Keypair, to: &Pubkey, lamports: u64) -> solana_sdk::transaction::Transaction {
-        let ix = system_instruction::transfer(&from.pubkey(), to, lamports);
+    fn make_transfer_tx(
+        from: &Keypair,
+        to: &Pubkey,
+        lamports: u64,
+    ) -> solana_sdk::transaction::Transaction {
+        let ix = system_ix::transfer(&from.pubkey(), to, lamports);
         let msg = Message::new(&[ix], Some(&from.pubkey()));
         solana_sdk::transaction::Transaction::new_unsigned(msg)
     }
@@ -204,15 +396,8 @@ mod tests {
         assert_eq!(resp.nonce, "deadbeef");
         assert_eq!(resp.signer_pubkey, keypair.pubkey().to_string());
 
-        // Verify signature
-        let sig_bytes = resp.decode_signature().unwrap();
-        use solana_sdk::signature::Signature;
-        let sig = Signature::from(sig_bytes);
         let signed_tx = resp.decode_transaction().unwrap();
-        assert!(signed_tx
-            .verify_with_results()
-            .iter()
-            .all(|&ok| ok));
+        assert!(signed_tx.verify_with_results().iter().all(|&ok| ok));
     }
 
     #[test]
@@ -228,7 +413,7 @@ mod tests {
         let req = SignRequest {
             version: 1,
             nonce: "aabb".to_owned(),
-            signer_pubkey: other.pubkey().to_string(), // different from signer
+            signer_pubkey: other.pubkey().to_string(),
             transaction_b64: STANDARD.encode(&tx_bytes),
             description: "".to_owned(),
             created_at: 0,
@@ -237,5 +422,65 @@ mod tests {
 
         let result = signer.sign_request(&req.to_json().unwrap());
         assert!(matches!(result, Err(AirSignError::InvalidRequest(_))));
+    }
+
+    #[test]
+    fn replay_attack_detected() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store_path = tmp.path().to_owned();
+        // Remove file so the nonce store starts empty
+        let _ = std::fs::remove_file(&store_path);
+
+        let keypair = Keypair::new();
+        let signer = AirSigner::from_bytes(&keypair.to_bytes(), "pw")
+            .with_nonce_store(&store_path);
+
+        let recipient = Pubkey::new_unique();
+        let tx = make_transfer_tx(&keypair, &recipient, 500_000);
+        let tx_bytes = bincode::serialize(&tx).unwrap();
+
+        let req = SignRequest {
+            version: 1,
+            nonce: "unique-nonce-xyz".to_owned(),
+            signer_pubkey: keypair.pubkey().to_string(),
+            transaction_b64: STANDARD.encode(&tx_bytes),
+            description: "replay test".to_owned(),
+            created_at: 0,
+            cluster: "devnet".to_owned(),
+        };
+        let json = req.to_json().unwrap();
+
+        // First sign — should succeed
+        signer.sign_request(&json).expect("first sign should succeed");
+
+        // Second sign with same nonce — must fail
+        let result = signer.sign_request(&json);
+        assert!(
+            matches!(result, Err(AirSignError::ReplayDetected(_))),
+            "expected ReplayDetected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn tx_summary_contains_transfer_info() {
+        let keypair = Keypair::new();
+        let recipient = Pubkey::new_unique();
+        let tx = make_transfer_tx(&keypair, &recipient, 1_500_000_000); // 1.5 SOL
+        let tx_bytes = bincode::serialize(&tx).unwrap();
+
+        let req = SignRequest {
+            version: 1,
+            nonce: "abc".to_owned(),
+            signer_pubkey: keypair.pubkey().to_string(),
+            transaction_b64: STANDARD.encode(&tx_bytes),
+            description: "pay rent".to_owned(),
+            created_at: 0,
+            cluster: "mainnet".to_owned(),
+        };
+
+        let summary = summarize_request(&req);
+        assert!(summary.contains("SOL Transfer"), "summary: {summary}");
+        assert!(summary.contains("1.500000000"), "summary: {summary}");
+        assert!(summary.contains("pay rent"), "summary: {summary}");
     }
 }

@@ -34,4 +34,4 @@ pub use broadcaster::Broadcaster;
 pub use error::AirSignError;
 pub use request::SignRequest;
 pub use response::SignResponse;
-pub use signer::AirSigner;
+pub use signer::{AirSigner, summarize_request, default_nonce_store_path};

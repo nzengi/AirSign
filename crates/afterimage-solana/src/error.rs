@@ -21,6 +21,18 @@ pub enum AirSignError {
     #[error("nonce mismatch — possible replay attack")]
     NonceMismatch,
 
+    /// A previously seen nonce was replayed.
+    #[error("replay attack detected: nonce '{0}' was already used")]
+    ReplayDetected(String),
+
+    /// The user declined to sign the transaction after reviewing it.
+    #[error("signing aborted by user")]
+    UserAborted,
+
+    /// I/O error when reading/writing nonce store or keypair file.
+    #[error("I/O error: {0}")]
+    Io(String),
+
     /// AfterImage core session error.
     #[error("session error: {0}")]
     Session(#[from] afterimage_core::error::AfterImageError),
