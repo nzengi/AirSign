@@ -37,6 +37,7 @@ pub mod preflight;
 pub mod request;
 pub mod response;
 pub mod signer;
+pub mod wallet;
 
 pub use broadcaster::Broadcaster;
 pub use error::{AirSignError, KeyStoreError, LedgerError};
@@ -48,6 +49,7 @@ pub use multisig_request::{MultiSignRequest, PartialSig};
 pub use multisig_response::MultiSignResponse;
 pub use multisigner::{MultiSigner, build_multisig_session, advance_round, advance_round_from};
 pub use preflight::{PreflightChecker, PreflightResult, resolve_cluster_url};
+pub use wallet::{WatchWallet, TransactionBuilder};
 pub use request::SignRequest;
 pub use response::SignResponse;
 pub use signer::{AirSigner, summarize_request, default_nonce_store_path};

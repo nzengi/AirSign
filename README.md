@@ -128,9 +128,9 @@ airsign bench test.bin
 |---|---|
 | `afterimage-core` | Protocol framing, fountain coding, Argon2id KDF, ChaCha20-Poly1305 encryption |
 | `afterimage-optical` | QR encode/decode, camera capture, display window |
-| `afterimage-solana` | `AirSigner` (Ed25519 signing), `KeyStore` (OS keychain), `LedgerSigner` (HID), `TransactionInspector` (static analysis), `PreflightChecker` (RPC simulation), `Broadcaster` (RPC submit) |
+| `afterimage-solana` | `AirSigner` (Ed25519 signing), `KeyStore` (OS keychain), `LedgerSigner` (HID), `WatchWallet` + `TransactionBuilder` (offline tx construction), `TransactionInspector` (static analysis), `PreflightChecker` (RPC simulation), `Broadcaster` (RPC submit) |
 | `afterimage-wasm` | WASM bindings for browser-based signers |
-| `airsign` (CLI) | `send`, `recv`, `bench`, `sign`, `inspect`, `broadcast`, `key`, `ledger`, `multisign` subcommands |
+| `airsign` (CLI) | `send`, `recv`, `bench`, `sign`, `inspect`, `prepare`, `broadcast`, `key`, `ledger`, `multisign` subcommands |
 
 ---
 
@@ -157,6 +157,86 @@ wasm-pack build crates/afterimage-wasm --target web
 ```
 
 The generated `pkg/` directory can be imported directly into any JavaScript/TypeScript project.
+
+---
+
+## Building unsigned transactions (`airsign prepare`)
+
+Use `airsign prepare` to construct an unsigned transaction directly from the
+command line — no custom dApp or wallet software required.  The output is a
+raw bincode `Transaction` file that can be piped straight into `airsign inspect`
+or `airsign send`.
+
+### SOL transfer
+
+```bash
+airsign prepare transfer \
+  --from 4wTQaBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890AB \
+  --to   9xRzAbCdEfGhIjKlMnOpQrStUvWxYZ12345678CD \
+  --amount 1.5 \
+  --memo "treasury payout Q2-2026" \
+  --cluster devnet \
+  --out unsigned_tx.bin
+```
+
+### SPL Token transfer
+
+ATAs are derived automatically if `--from-ata` / `--to-ata` are omitted.
+
+```bash
+airsign prepare token-transfer \
+  --from     4wTQaBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890AB \
+  --to       9xRzAbCdEfGhIjKlMnOpQrStUvWxYZ12345678CD \
+  --mint     EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v \
+  --amount   1000000 \
+  --decimals 6 \
+  --cluster  mainnet \
+  --out      unsigned_tx.bin
+```
+
+### Stake account withdrawal
+
+```bash
+# Withdraw 5 SOL
+airsign prepare stake-withdraw \
+  --from          4wTQaBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890AB \
+  --stake-account 3kZjAbCdEfGhIjKlMnOpQrStUvWxYZ1234567890AB \
+  --to            9xRzAbCdEfGhIjKlMnOpQrStUvWxYZ12345678CD \
+  --amount        5.0 \
+  --cluster       mainnet \
+  --out           unsigned_tx.bin
+
+# Or withdraw the entire balance
+airsign prepare stake-withdraw \
+  --from          4wTQaBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890AB \
+  --stake-account 3kZjAbCdEfGhIjKlMnOpQrStUvWxYZ1234567890AB \
+  --to            9xRzAbCdEfGhIjKlMnOpQrStUvWxYZ12345678CD \
+  --amount-all \
+  --cluster       mainnet \
+  --out           unsigned_tx.bin
+```
+
+### Full workflow with `prepare`
+
+```bash
+# 1. Build the unsigned tx
+airsign prepare transfer --from <ONLINE_PK> --to <DEST_PK> --amount 2.0 --cluster mainnet
+
+# 2. Inspect it before sending
+airsign inspect unsigned_tx.bin --cluster mainnet --simulate
+
+# 3. Send over QR to the air-gapped machine
+airsign send unsigned_tx.bin --fps 8
+
+# (on air-gapped machine)
+airsign recv sign_request.json
+airsign sign sign_request.json --keypair ~/.config/solana/id.json
+airsign send sign_response.json --fps 8
+
+# 4. Receive signature and broadcast
+airsign recv sign_response.json
+airsign broadcast sign_response.json --cluster mainnet
+```
 
 ---
 

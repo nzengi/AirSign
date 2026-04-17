@@ -10,6 +10,7 @@
 //! airsign bench     <FILE>
 //! airsign sign      <REQUEST_FILE> --keypair <PATH|keychain:LABEL|ledger:PATH> [--output PATH] [--yes]
 //! airsign inspect   <TX_FILE|REQUEST_FILE> [--cluster devnet|mainnet] [--simulate]
+//! airsign prepare   transfer | token-transfer | stake-withdraw
 //! airsign broadcast <RESPONSE_FILE> [--cluster devnet|mainnet|testnet]
 //! airsign key       generate | import | show | list | export | delete
 //! airsign ledger    list | pubkey | version
@@ -33,6 +34,7 @@ use afterimage_solana::{
     ledger_apdu::DerivationPath,
     preflight::{PreflightChecker, resolve_cluster_url},
     signer::{AirSigner, summarize_request, default_nonce_store_path},
+    wallet::{WatchWallet, TransactionBuilder},
     SignRequest,
     MultiSignRequest, MultiSignResponse, MultiSigner,
     build_multisig_session, advance_round_from,
@@ -209,6 +211,30 @@ enum Commands {
         simulate: bool,
     },
 
+    /// Build an unsigned transaction and write it to a file for AirSign QR transmission.
+    ///
+    /// Three sub-operations are provided:
+    ///
+    /// `transfer`       — SOL transfer from the fee-payer to a recipient.
+    ///
+    /// `token-transfer` — SPL Token `TransferChecked` from a source ATA to a
+    ///                    destination ATA.
+    ///
+    /// `stake-withdraw` — Stake account withdrawal to a recipient address.
+    ///
+    /// After generating the unsigned transaction, pipe it through
+    /// `airsign inspect` or `airsign send`.
+    ///
+    /// ## Examples
+    ///
+    /// ```text
+    /// airsign prepare transfer --from 4wTQ… --to 9xRz… --amount 1.5 --cluster devnet
+    /// airsign prepare token-transfer --from 4wTQ… --mint EPjF… --to 9xRz… --amount 100 --decimals 6
+    /// airsign prepare stake-withdraw --stake-account 3kZj… --to 4wTQ… --amount 5.0 --cluster mainnet
+    /// ```
+    #[command(subcommand)]
+    Prepare(PrepareCommands),
+
     /// Broadcast a signed-transaction file (SignResponse JSON) to a Solana cluster.
     Broadcast {
         /// Path to the SignResponse JSON file produced by the air-gapped machine.
@@ -265,6 +291,8 @@ fn main() {
             cluster,
             simulate,
         } => cmd_inspect(file, cluster, simulate),
+
+        Commands::Prepare(sub) => cmd_prepare(sub),
 
         Commands::Broadcast {
             response_file,
@@ -1285,6 +1313,308 @@ fn cmd_broadcast(response_file: PathBuf, cluster: String) {
             std::process::exit(1);
         }
     }
+}
+
+// ─── prepare sub-commands ─────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum PrepareCommands {
+    /// Build an unsigned SOL transfer transaction.
+    ///
+    /// The fee payer and sender are the same wallet (--from).
+    Transfer {
+        /// Sender / fee-payer public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        from: String,
+
+        /// Recipient public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        to: String,
+
+        /// Amount in SOL (e.g. 1.5).  Converted to lamports automatically.
+        #[arg(long, value_name = "SOL")]
+        amount: f64,
+
+        /// Optional UTF-8 memo to attach.
+        #[arg(long, value_name = "TEXT")]
+        memo: Option<String>,
+
+        /// Solana cluster (devnet | mainnet | testnet | URL).
+        /// Used to fetch the recent blockhash.
+        #[arg(long, default_value = "devnet")]
+        cluster: String,
+
+        /// Output file path for the bincode Transaction.
+        #[arg(long, default_value = "unsigned_tx.bin")]
+        out: PathBuf,
+    },
+
+    /// Build an unsigned SPL Token TransferChecked transaction.
+    ///
+    /// Source and destination are Associated Token Accounts (ATAs).
+    /// Use --from-ata / --to-ata if you want to supply explicit ATA addresses;
+    /// otherwise they are derived automatically from the wallet public keys.
+    #[command(name = "token-transfer")]
+    TokenTransfer {
+        /// Wallet / fee-payer public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        from: String,
+
+        /// Source ATA public key.  If omitted, derived from --from + --mint.
+        #[arg(long, value_name = "PUBKEY")]
+        from_ata: Option<String>,
+
+        /// Recipient wallet public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        to: String,
+
+        /// Destination ATA public key.  If omitted, derived from --to + --mint.
+        #[arg(long, value_name = "PUBKEY")]
+        to_ata: Option<String>,
+
+        /// Mint public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        mint: String,
+
+        /// Token amount in the smallest unit (raw, not decimal-adjusted).
+        #[arg(long, value_name = "AMOUNT")]
+        amount: u64,
+
+        /// Token decimals (as stored in the mint account).
+        #[arg(long, default_value_t = 6, value_name = "N")]
+        decimals: u8,
+
+        /// Optional UTF-8 memo.
+        #[arg(long, value_name = "TEXT")]
+        memo: Option<String>,
+
+        /// Solana cluster for blockhash fetch.
+        #[arg(long, default_value = "devnet")]
+        cluster: String,
+
+        /// Output file path for the bincode Transaction.
+        #[arg(long, default_value = "unsigned_tx.bin")]
+        out: PathBuf,
+    },
+
+    /// Build an unsigned Stake Withdraw transaction.
+    ///
+    /// Withdraws `--amount` SOL (or all, if --amount-all is set) from a stake
+    /// account to a recipient address.  The fee-payer wallet is used as the
+    /// withdraw authority.
+    #[command(name = "stake-withdraw")]
+    StakeWithdraw {
+        /// Withdraw authority / fee-payer public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        from: String,
+
+        /// Stake account public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        stake_account: String,
+
+        /// Recipient public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        to: String,
+
+        /// Amount in SOL.  Mutually exclusive with --amount-all.
+        #[arg(long, value_name = "SOL", conflicts_with = "amount_all")]
+        amount: Option<f64>,
+
+        /// Withdraw the entire stake account balance.
+        #[arg(long, conflicts_with = "amount")]
+        amount_all: bool,
+
+        /// Override lamports directly (skips SOL conversion).
+        #[arg(long, value_name = "LAMPORTS", conflicts_with_all = &["amount", "amount_all"])]
+        lamports: Option<u64>,
+
+        /// Optional UTF-8 memo.
+        #[arg(long, value_name = "TEXT")]
+        memo: Option<String>,
+
+        /// Solana cluster for blockhash fetch.
+        #[arg(long, default_value = "devnet")]
+        cluster: String,
+
+        /// Output file path for the bincode Transaction.
+        #[arg(long, default_value = "unsigned_tx.bin")]
+        out: PathBuf,
+    },
+}
+
+// ─── cmd_prepare ──────────────────────────────────────────────────────────────
+
+fn cmd_prepare(sub: PrepareCommands) {
+    match sub {
+        // ── transfer ──────────────────────────────────────────────────────────
+        PrepareCommands::Transfer {
+            from,
+            to,
+            amount,
+            memo,
+            cluster,
+            out,
+        } => {
+            let from_pk = parse_pubkey(&from, "--from");
+            let to_pk = parse_pubkey(&to, "--to");
+            let lamports = sol_to_lamports(amount);
+            let rpc_url = resolve_cluster_url(&cluster);
+
+            eprintln!(
+                "[airsign] prepare transfer: {} → {} | {:.9} SOL ({} lamports) | cluster: {}",
+                from_pk, to_pk, amount, lamports, rpc_url
+            );
+
+            let wallet = WatchWallet::new(from_pk, &rpc_url);
+            let mut builder = wallet.builder().transfer(to_pk, lamports);
+            if let Some(text) = memo {
+                builder = builder.memo(text);
+            }
+
+            let tx = builder.build().unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+
+            write_tx_bin(&tx, &out);
+            eprintln!("[airsign] ✓ unsigned transaction written to {:?}", out);
+            eprintln!("[airsign]   next step: airsign inspect {:?} --cluster {} --simulate", out, cluster);
+            eprintln!("[airsign]              airsign send {:?}", out);
+        }
+
+        // ── token-transfer ────────────────────────────────────────────────────
+        PrepareCommands::TokenTransfer {
+            from,
+            from_ata,
+            to,
+            to_ata,
+            mint,
+            amount,
+            decimals,
+            memo,
+            cluster,
+            out,
+        } => {
+            let from_pk = parse_pubkey(&from, "--from");
+            let to_pk = parse_pubkey(&to, "--to");
+            let mint_pk = parse_pubkey(&mint, "--mint");
+            let rpc_url = resolve_cluster_url(&cluster);
+
+            // Derive ATAs if not explicitly supplied
+            let source_ata = from_ata
+                .as_deref()
+                .map(|s| parse_pubkey(s, "--from-ata"))
+                .unwrap_or_else(|| WatchWallet::ata_for(&from_pk, &mint_pk));
+            let dest_ata = to_ata
+                .as_deref()
+                .map(|s| parse_pubkey(s, "--to-ata"))
+                .unwrap_or_else(|| WatchWallet::ata_for(&to_pk, &mint_pk));
+
+            eprintln!(
+                "[airsign] prepare token-transfer: {} → {} | mint {} | amount {} (decimals {}) | cluster: {}",
+                source_ata, dest_ata, mint_pk, amount, decimals, rpc_url
+            );
+
+            let wallet = WatchWallet::new(from_pk, &rpc_url);
+            let mut builder = wallet
+                .builder()
+                .token_transfer(source_ata, dest_ata, mint_pk, amount, decimals)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+            if let Some(text) = memo {
+                builder = builder.memo(text);
+            }
+
+            let tx = builder.build().unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+
+            write_tx_bin(&tx, &out);
+            eprintln!("[airsign] ✓ unsigned token-transfer tx written to {:?}", out);
+        }
+
+        // ── stake-withdraw ────────────────────────────────────────────────────
+        PrepareCommands::StakeWithdraw {
+            from,
+            stake_account,
+            to,
+            amount,
+            amount_all,
+            lamports: lamports_override,
+            memo,
+            cluster,
+            out,
+        } => {
+            let from_pk = parse_pubkey(&from, "--from");
+            let stake_pk = parse_pubkey(&stake_account, "--stake-account");
+            let to_pk = parse_pubkey(&to, "--to");
+            let rpc_url = resolve_cluster_url(&cluster);
+
+            let lamports = if let Some(lams) = lamports_override {
+                lams
+            } else if amount_all {
+                // Fetch current stake account balance via WatchWallet (no extra dep)
+                WatchWallet::new(stake_pk, rpc_url.clone())
+                    .balance()
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: cannot fetch stake account balance: {e}");
+                        std::process::exit(1);
+                    })
+            } else {
+                let sol = amount.unwrap_or_else(|| {
+                    eprintln!("error: one of --amount, --amount-all, or --lamports is required");
+                    std::process::exit(1);
+                });
+                sol_to_lamports(sol)
+            };
+
+            eprintln!(
+                "[airsign] prepare stake-withdraw: stake={} → {} | {} lamports | cluster: {}",
+                stake_pk, to_pk, lamports, rpc_url
+            );
+
+            let wallet = WatchWallet::new(from_pk, &rpc_url);
+            let mut builder = wallet.builder().stake_withdraw(stake_pk, to_pk, lamports);
+            if let Some(text) = memo {
+                builder = builder.memo(text);
+            }
+
+            let tx = builder.build().unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+
+            write_tx_bin(&tx, &out);
+            eprintln!("[airsign] ✓ unsigned stake-withdraw tx written to {:?}", out);
+        }
+    }
+}
+
+// ─── prepare helpers ──────────────────────────────────────────────────────────
+
+fn parse_pubkey(s: &str, flag: &str) -> solana_sdk::pubkey::Pubkey {
+    s.parse::<solana_sdk::pubkey::Pubkey>().unwrap_or_else(|e| {
+        eprintln!("error: invalid pubkey for {flag} {:?}: {e}", s);
+        std::process::exit(1);
+    })
+}
+
+fn sol_to_lamports(sol: f64) -> u64 {
+    (sol * 1_000_000_000.0).round() as u64
+}
+
+fn write_tx_bin(tx: &solana_sdk::transaction::Transaction, path: &PathBuf) {
+    let bytes = bincode::serialize(tx).unwrap_or_else(|e| {
+        eprintln!("error: cannot serialise transaction: {e}");
+        std::process::exit(1);
+    });
+    std::fs::write(path, &bytes).unwrap_or_else(|e| {
+        eprintln!("error: cannot write {:?}: {e}", path);
+        std::process::exit(1);
+    });
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

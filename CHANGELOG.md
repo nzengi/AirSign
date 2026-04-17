@@ -11,6 +11,26 @@ Versioning follows [SemVer](https://semver.org/).
 
 ### Added
 
+- **Watch-only Wallet & Transaction Builder** (`afterimage-solana`, `airsign prepare`)
+  - `crates/afterimage-solana/src/wallet.rs` — `WatchWallet` (public-key-only,
+    never touches private key material) with `balance()`, `recent_blockhash()`,
+    `ata_address()`, `ata_for()` helpers, and a `builder()` factory.
+    `TransactionBuilder` fluent API supports: `transfer()` (SOL),
+    `token_transfer()` (SPL Token `TransferChecked`), `create_ata()`,
+    `memo()` (SPL Memo v2), `stake_withdraw()` (Stake program Withdraw
+    instruction, using `solana_sdk::stake::program::id()`), and
+    `with_blockhash()` for test / offline use.  `build()` fetches the recent
+    blockhash from the cluster when none is pre-set.  16 unit tests, all passing.
+  - `lib.rs` — re-exports `wallet` module (`WatchWallet`, `TransactionBuilder`).
+  - `airsign prepare <SUBCOMMAND>` — new CLI subcommand with three operations:
+    - `transfer --from PUBKEY --to PUBKEY --amount SOL [--memo TEXT] [--cluster] [--out FILE]`
+    - `token-transfer --from PUBKEY --mint PUBKEY --to PUBKEY --amount N [--decimals N]
+      [--from-ata PUBKEY] [--to-ata PUBKEY] [--memo TEXT] [--cluster] [--out FILE]`
+    - `stake-withdraw --from PUBKEY --stake-account PUBKEY --to PUBKEY
+      (--amount SOL | --amount-all | --lamports N) [--memo TEXT] [--cluster] [--out FILE]`
+    All three write an unsigned bincode `Transaction` to disk, ready for
+    `airsign inspect` or `airsign send`.
+
 - **Transaction Inspector & Pre-flight Checker** (`afterimage-solana`, `airsign` CLI)
   - `crates/afterimage-solana/src/inspector.rs` — `TransactionInspector` with
     static analysis of System Program transfers, SPL Token transfers/mints/burns,
