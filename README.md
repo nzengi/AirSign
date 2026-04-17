@@ -168,7 +168,7 @@ The generated `pkg/` directory can be imported directly into any JavaScript/Type
 | Persistent nonce store (replay protection) | ✅ Done | `~/.airsign/seen_nonces.json` |
 | Terminal tx review + confirmation prompt | ✅ Done | `sign_request_confirmed()` |
 | Versioned sign envelopes (v1) | ✅ Done | `SignRequest::version` field |
-| `airsign sign` CLI subcommand | 🔜 Next | Read request file, prompt, output response file |
+| `airsign sign` CLI subcommand | ✅ Done | `airsign sign <req.json> --keypair <path> [--yes]` |
 | Password hardening (Argon2id tuning) | 🔜 Next | Increase memory cost for mainnet use; configurable via `--argon2-mem` |
 | Multi-signature support | 🔜 Planned | Allow M-of-N signers via sequential QR rounds |
 | Hardware-backed key storage | 🔜 Planned | Optionally store keypair in OS keychain / TPM |
