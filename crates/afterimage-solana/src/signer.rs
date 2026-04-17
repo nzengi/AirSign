@@ -20,12 +20,11 @@ use solana_sdk::{
     signature::Signer,
     signer::keypair::Keypair,
 };
-use solana_system_interface::program as system_program;
-
 use afterimage_core::session::{RecvSession, SendSession};
 
 use crate::{
     error::AirSignError,
+    inspector::TransactionInspector,
     request::SignRequest,
     response::SignResponse,
 };
@@ -68,65 +67,48 @@ fn persist_nonce(path: &Path, nonce: &str) -> Result<(), AirSignError> {
 
 /// Parse a `SignRequest` and return a human-readable summary string.
 ///
-/// Shown on the air-gapped machine before the user approves signing.
+/// Uses [`TransactionInspector`] to decode all known instruction types and
+/// generate risk flags.  Shown on the air-gapped machine before the user
+/// approves signing.
 pub fn summarize_request(req: &SignRequest) -> String {
-    let mut lines: Vec<String> = Vec::new();
+    let mut out = String::new();
 
-    lines.push("┌─ AirSign — Transaction Review ──────────────────────────────┐".into());
-    lines.push(format!("│  Description : {}", truncate(&req.description, 50)));
-    lines.push(format!("│  Cluster     : {}", if req.cluster.is_empty() { "unknown" } else { &req.cluster }));
-    lines.push(format!("│  Nonce       : {}", truncate(&req.nonce, 16)));
-    lines.push(format!("│  Signer      : {}", truncate(&req.signer_pubkey, 44)));
+    // Header
+    out.push_str("┌─ AirSign — Transaction Review ──────────────────────────────┐\n");
+    out.push_str(&format!(
+        "│  Description : {}\n",
+        truncate(&req.description, 50)
+    ));
+    out.push_str(&format!(
+        "│  Cluster     : {}\n",
+        if req.cluster.is_empty() { "unknown" } else { &req.cluster }
+    ));
+    out.push_str(&format!("│  Nonce       : {}\n", truncate(&req.nonce, 16)));
+    out.push_str(&format!(
+        "│  Signer      : {}\n",
+        truncate(&req.signer_pubkey, 44)
+    ));
+    out.push_str("└──────────────────────────────────────────────────────────────┘\n");
 
+    // Inspector analysis
     match req.decode_transaction() {
         Ok(tx) => {
-            lines.push(format!("│  Instructions: {}", tx.message.instructions.len()));
-            for (i, ix) in tx.message.instructions.iter().enumerate() {
-                let prog_idx = ix.program_id_index as usize;
-                let prog = tx.message.account_keys
-                    .get(prog_idx)
-                    .map(|k| k.to_string())
-                    .unwrap_or_else(|| "unknown".into());
+            let summary = TransactionInspector::inspect_tx(&tx);
+            out.push_str(&summary.render());
 
-                // Try to decode System Program transfer
-                if tx.message.account_keys.get(prog_idx).map(|k| *k == system_program::id()).unwrap_or(false) {
-                    if let Ok(sys_ix) = bincode::deserialize::<solana_system_interface::instruction::SystemInstruction>(&ix.data) {
-                        match sys_ix {
-                            solana_system_interface::instruction::SystemInstruction::Transfer { lamports } => {
-                                let from = ix.accounts.first()
-                                    .and_then(|&ai| tx.message.account_keys.get(ai as usize))
-                                    .map(|k| truncate(&k.to_string(), 22))
-                                    .unwrap_or_else(|| "?".into());
-                                let to = ix.accounts.get(1)
-                                    .and_then(|&ai| tx.message.account_keys.get(ai as usize))
-                                    .map(|k| truncate(&k.to_string(), 22))
-                                    .unwrap_or_else(|| "?".into());
-                                let sol = lamports as f64 / 1_000_000_000.0;
-                                lines.push(format!("│  [{i}] SOL Transfer: {sol:.9} SOL"));
-                                lines.push(format!("│      From : {from}"));
-                                lines.push(format!("│      To   : {to}"));
-                                continue;
-                            }
-                            other => {
-                                lines.push(format!("│  [{i}] System IX: {other:?}"));
-                                continue;
-                            }
-                        }
-                    }
-                }
-
-                lines.push(format!("│  [{i}] Program: {}", truncate(&prog, 44)));
+            // Extra warning when HIGH risk detected
+            if summary.has_high_risk() {
+                out.push_str(
+                    "\n⛔ HIGH RISK — review the flags above very carefully.\n"
+                );
             }
         }
         Err(e) => {
-            lines.push(format!("│  ⚠ Could not parse transaction: {e}"));
+            out.push_str(&format!("⚠  Could not decode transaction: {e}\n"));
         }
     }
 
-    lines.push("│".into());
-    lines.push("│  ⚠  Verify the above carefully before approving.".into());
-    lines.push("└──────────────────────────────────────────────────────────────┘".into());
-    lines.join("\n")
+    out
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -479,7 +461,7 @@ mod tests {
         };
 
         let summary = summarize_request(&req);
-        assert!(summary.contains("SOL Transfer"), "summary: {summary}");
+        assert!(summary.contains("System :: Transfer"), "summary: {summary}");
         assert!(summary.contains("1.500000000"), "summary: {summary}");
         assert!(summary.contains("pay rent"), "summary: {summary}");
     }

@@ -26,24 +26,28 @@
 
 pub mod broadcaster;
 pub mod error;
+pub mod inspector;
 pub mod keystore;
 pub mod ledger;
 pub mod ledger_apdu;
 pub mod multisig_request;
 pub mod multisig_response;
 pub mod multisigner;
+pub mod preflight;
 pub mod request;
 pub mod response;
 pub mod signer;
 
 pub use broadcaster::Broadcaster;
 pub use error::{AirSignError, KeyStoreError, LedgerError};
+pub use inspector::{TransactionInspector, TransactionSummary, InstructionInfo, RiskFlag};
 pub use keystore::KeyStore;
 pub use ledger::{LedgerSigner, LedgerDeviceInfo};
 pub use ledger_apdu::DerivationPath;
 pub use multisig_request::{MultiSignRequest, PartialSig};
 pub use multisig_response::MultiSignResponse;
 pub use multisigner::{MultiSigner, build_multisig_session, advance_round, advance_round_from};
+pub use preflight::{PreflightChecker, PreflightResult, resolve_cluster_url};
 pub use request::SignRequest;
 pub use response::SignResponse;
 pub use signer::{AirSigner, summarize_request, default_nonce_store_path};

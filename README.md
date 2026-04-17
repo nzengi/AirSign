@@ -128,9 +128,9 @@ airsign bench test.bin
 |---|---|
 | `afterimage-core` | Protocol framing, fountain coding, Argon2id KDF, ChaCha20-Poly1305 encryption |
 | `afterimage-optical` | QR encode/decode, camera capture, display window |
-| `afterimage-solana` | `AirSigner` (Ed25519 signing), `KeyStore` (OS keychain), `LedgerSigner` (HID), `Broadcaster` (RPC submit) |
+| `afterimage-solana` | `AirSigner` (Ed25519 signing), `KeyStore` (OS keychain), `LedgerSigner` (HID), `TransactionInspector` (static analysis), `PreflightChecker` (RPC simulation), `Broadcaster` (RPC submit) |
 | `afterimage-wasm` | WASM bindings for browser-based signers |
-| `airsign` (CLI) | `send`, `recv`, `bench`, `sign`, `broadcast`, `key`, `ledger`, `multisign` subcommands |
+| `airsign` (CLI) | `send`, `recv`, `bench`, `sign`, `inspect`, `broadcast`, `key`, `ledger`, `multisign` subcommands |
 
 ---
 
@@ -157,6 +157,72 @@ wasm-pack build crates/afterimage-wasm --target web
 ```
 
 The generated `pkg/` directory can be imported directly into any JavaScript/TypeScript project.
+
+---
+
+## Transaction inspection and pre-flight
+
+Before signing (or independently of the signing flow), you can inspect any
+transaction file and run an optional RPC simulation:
+
+```bash
+# Static analysis only (no network required)
+airsign inspect unsigned_tx.bin
+
+# Parse a SignRequest JSON and inspect it
+airsign inspect sign_request.json
+
+# Static analysis + RPC simulation against devnet
+airsign inspect sign_request.json --cluster devnet --simulate
+```
+
+### What the inspector checks
+
+The inspector decodes every instruction in the transaction and displays a
+structured summary:
+
+| Instruction type | Fields shown |
+|---|---|
+| System :: Transfer | from, to, amount in SOL |
+| SPL Token :: Transfer | source, dest, mint, amount |
+| SPL Token :: MintTo | mint, dest, amount |
+| SPL Token :: Burn | source, mint, amount |
+| SPL Token :: SetAuthority | account, authority type, new authority |
+| ATA :: Create | payer, wallet, mint |
+| Memo | text content |
+| Unknown | program ID, data hex, account count |
+
+Risk flags are raised automatically:
+
+| Flag | Severity | Trigger |
+|---|---|---|
+| `LARGE_SOL_TRANSFER` | HIGH | any single SOL transfer ≥ 100 SOL |
+| `LARGE_TOKEN_TRANSFER` | HIGH | any token transfer ≥ 1 000 000 |
+| `UPGRADE_AUTHORITY_CHANGE` | HIGH | `SetAuthority` on an upgrade-authority slot |
+| `UNKNOWN_PROGRAM` | MEDIUM | any instruction targeting an unrecognised program |
+| `SYSTEM_ACCOUNT_WRITE` | MEDIUM | system accounts (e.g. System Program) in writable position |
+
+The command exits with code **0** if no HIGH risk flags were found, or **2**
+if one or more HIGH risk flags are raised — making it easy to gate CI or
+scripted signing flows:
+
+```bash
+airsign inspect sign_request.json || { echo "HIGH RISK — aborting"; exit 1; }
+```
+
+### Pre-flight (RPC simulation + fee estimation)
+
+When `--cluster` is supplied (with or without `--simulate`), `airsign inspect`
+also calls the cluster's `getFeeForMessage` RPC method and, if `--simulate` is
+set, `simulateTransaction`.  The fee and simulation logs are printed below the
+static summary.
+
+```
+Pre-flight against https://api.devnet.solana.com
+  Fee              : 5000 lamports (0.000005000 SOL)
+  Simulation       : ✓ success
+  Compute units    : 450
+```
 
 ---
 

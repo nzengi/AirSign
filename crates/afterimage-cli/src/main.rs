@@ -9,6 +9,7 @@
 //! airsign recv      <OUTPUT> [--camera-index N]
 //! airsign bench     <FILE>
 //! airsign sign      <REQUEST_FILE> --keypair <PATH|keychain:LABEL|ledger:PATH> [--output PATH] [--yes]
+//! airsign inspect   <TX_FILE|REQUEST_FILE> [--cluster devnet|mainnet] [--simulate]
 //! airsign broadcast <RESPONSE_FILE> [--cluster devnet|mainnet|testnet]
 //! airsign key       generate | import | show | list | export | delete
 //! airsign ledger    list | pubkey | version
@@ -26,9 +27,11 @@ use afterimage_core::{
 use solana_sdk::signature::Signer as _;
 use afterimage_solana::{
     broadcaster::Broadcaster,
+    inspector::TransactionInspector,
     keystore::KeyStore,
     ledger::LedgerSigner,
     ledger_apdu::DerivationPath,
+    preflight::{PreflightChecker, resolve_cluster_url},
     signer::{AirSigner, summarize_request, default_nonce_store_path},
     SignRequest,
     MultiSignRequest, MultiSignResponse, MultiSigner,
@@ -178,6 +181,34 @@ enum Commands {
     #[command(subcommand)]
     Multisign(MultisignCommands),
 
+    /// Inspect a transaction file and display a human-readable summary with risk flags.
+    ///
+    /// Accepts either a raw bincode Transaction (`.bin`), a SignRequest JSON
+    /// (`.json`), or a MultiSignRequest JSON.  Optionally runs an RPC
+    /// simulation against the specified cluster.
+    ///
+    /// ## Examples
+    ///
+    /// ```text
+    /// airsign inspect unsigned_tx.bin
+    /// airsign inspect sign_request.json --cluster devnet --simulate
+    /// ```
+    Inspect {
+        /// Path to a bincode Transaction, SignRequest JSON, or MultiSignRequest JSON.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+
+        /// Solana cluster for fee estimation and simulation (devnet | mainnet | testnet | URL).
+        /// If omitted, only static analysis is performed.
+        #[arg(long, value_name = "CLUSTER")]
+        cluster: Option<String>,
+
+        /// Run RPC simulation against the cluster and display the result.
+        /// Requires --cluster.
+        #[arg(long, requires = "cluster")]
+        simulate: bool,
+    },
+
     /// Broadcast a signed-transaction file (SignResponse JSON) to a Solana cluster.
     Broadcast {
         /// Path to the SignResponse JSON file produced by the air-gapped machine.
@@ -228,6 +259,12 @@ fn main() {
         Commands::Ledger(sub) => cmd_ledger(sub),
 
         Commands::Multisign(sub) => cmd_multisign(sub),
+
+        Commands::Inspect {
+            file,
+            cluster,
+            simulate,
+        } => cmd_inspect(file, cluster, simulate),
 
         Commands::Broadcast {
             response_file,
@@ -1145,6 +1182,71 @@ fn cmd_bench(file: PathBuf, password: String) {
         );
         std::process::exit(2);
     }
+}
+
+// ─── inspect ──────────────────────────────────────────────────────────────────
+
+fn cmd_inspect(file: PathBuf, cluster: Option<String>, simulate: bool) {
+    // ── Load file ──────────────────────────────────────────────────────────────
+    let raw = std::fs::read(&file).unwrap_or_else(|e| {
+        eprintln!("error: cannot read {:?}: {e}", file);
+        std::process::exit(1);
+    });
+
+    // ── Determine input format and extract tx bytes ────────────────────────────
+    // Try SignRequest JSON first, then raw bincode Transaction.
+    let tx_bytes: Vec<u8> = if let Ok(req) = SignRequest::from_json(&raw) {
+        eprintln!("[airsign] inspect: parsed as SignRequest JSON");
+        eprintln!("[airsign]   description : {}", req.description);
+        eprintln!("[airsign]   cluster     : {}", req.cluster);
+        eprintln!("[airsign]   signer      : {}", req.signer_pubkey);
+        match req.decode_transaction() {
+            Ok(tx) => bincode::serialize(&tx).unwrap_or_else(|e| {
+                eprintln!("error: re-serialise tx: {e}");
+                std::process::exit(1);
+            }),
+            Err(e) => {
+                eprintln!("error: cannot decode transaction in SignRequest: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // Assume raw bincode Transaction
+        eprintln!("[airsign] inspect: treating file as raw bincode Transaction");
+        raw
+    };
+
+    // ── Static analysis ────────────────────────────────────────────────────────
+    let summary = TransactionInspector::inspect(&tx_bytes).unwrap_or_else(|e| {
+        eprintln!("error: could not parse transaction: {e}");
+        std::process::exit(1);
+    });
+
+    println!("{}", summary.render());
+
+    // Exit with code 2 if HIGH risk (allows scripted gating)
+    let exit_code = if summary.has_high_risk() { 2i32 } else { 0i32 };
+
+    // ── Pre-flight / simulation (optional) ────────────────────────────────────
+    if let Some(ref cluster_hint) = cluster {
+        let rpc_url = resolve_cluster_url(cluster_hint);
+        eprintln!("[airsign] running pre-flight check against {}…", rpc_url);
+        let checker = PreflightChecker::new(&rpc_url);
+        match checker.check(&tx_bytes) {
+            Ok(result) => {
+                println!("{}", result.render());
+                if simulate && !result.success {
+                    eprintln!("[airsign] ⚠  simulation indicates this transaction would FAIL");
+                    std::process::exit(exit_code.max(1));
+                }
+            }
+            Err(e) => {
+                eprintln!("[airsign] ⚠  pre-flight check failed: {e}");
+            }
+        }
+    }
+
+    std::process::exit(exit_code);
 }
 
 // ─── broadcast ────────────────────────────────────────────────────────────────

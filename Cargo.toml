@@ -13,7 +13,7 @@ version      = "2.0.0"
 edition      = "2021"
 authors      = ["AfterImage Contributors"]
 license      = "AGPL-3.0-or-later"
-repository   = "https://github.com/nzengi/AfterImage"
+repository   = "https://github.com/nzengi/AirSign"
 keywords     = ["air-gap", "qr-code", "fountain-codes", "cryptography", "optical"]
 categories   = ["cryptography", "multimedia"]
 
@@ -65,6 +65,8 @@ getrandom    = { version = "0.3", features = ["wasm_js"] }
 solana-sdk              = "2.3"
 solana-client           = "2.3"
 solana-system-interface = "1"
+spl-token               = { version = "7", features = ["no-entrypoint"] }
+spl-associated-token-account = { version = "6", features = ["no-entrypoint"] }
 
 # ── PBKDF2 / SHA-2 (v1 Python compat) ───────────────────────────────────────
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }

@@ -15,6 +15,8 @@ afterimage-optical = { workspace = true }
 solana-sdk              = { workspace = true }
 solana-client           = { workspace = true }
 solana-system-interface = { workspace = true }
+spl-token               = { workspace = true }
+spl-associated-token-account = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 thiserror  = { workspace = true }

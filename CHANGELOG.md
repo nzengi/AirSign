@@ -10,6 +10,37 @@ Versioning follows [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+
+- **Transaction Inspector & Pre-flight Checker** (`afterimage-solana`, `airsign` CLI)
+  - `crates/afterimage-solana/src/inspector.rs` — `TransactionInspector` with
+    static analysis of System Program transfers, SPL Token transfers/mints/burns,
+    Associated Token Account creation, Memo instructions, and generic unknown
+    programs.  Produces a `TransactionSummary` with per-instruction `InstructionInfo`
+    records and a `Vec<RiskFlag>` (upgrade-authority change, large SOL transfer,
+    large token transfer, unknown program, write-locked system accounts).
+    `TransactionSummary::render()` produces a human-readable, emoji-annotated
+    table; `has_high_risk()` returns `true` when any HIGH-severity flag is
+    present.  20 unit tests covering all instruction variants and all risk-flag
+    triggers, all passing.
+  - `crates/afterimage-solana/src/preflight.rs` — `PreflightChecker` performs
+    RPC simulation (`simulateTransaction`) and fee estimation
+    (`getFeeForMessage`) against any Solana cluster.  `PreflightResult::render()`
+    formats the simulation outcome, fee, and log lines.  `resolve_cluster_url()`
+    maps `devnet` / `mainnet` / `testnet` shorthands to their canonical RPC
+    URLs.  7 unit tests (all passing).
+  - `signer.rs` — `summarize_request()` rewritten to delegate to
+    `TransactionInspector`, replacing the hand-rolled decoder.  Test assertion
+    updated from `"SOL Transfer"` to `"System :: Transfer"` to match the new
+    renderer.
+  - `lib.rs` — re-exports `inspector` and `preflight` modules.
+  - `keystore.rs` — doctest fixed: added `use solana_sdk::signature::Signer as _`
+    so the example compiles under strict doctest mode.
+  - `airsign inspect <FILE> [--cluster CLUSTER] [--simulate]` — new CLI
+    subcommand.  Accepts raw bincode Transactions (`.bin`) or SignRequest JSON
+    files.  Prints the inspector summary to stdout; exits with code 2 on HIGH
+    risk.  With `--cluster` and `--simulate`, also runs RPC pre-flight and
+    prints the result.
+
 - **Ledger hardware wallet support** (`afterimage-solana`, `airsign` CLI)
   - `crates/afterimage-solana/src/ledger_apdu.rs` — full Solana Ledger APDU
     codec: HID framing, BIP44 `DerivationPath` (parse / serialise / display),

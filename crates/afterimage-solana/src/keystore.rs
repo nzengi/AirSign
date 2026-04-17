@@ -12,6 +12,7 @@
 //!
 //! ```no_run
 //! use afterimage_solana::keystore::KeyStore;
+//! use solana_sdk::signature::Signer as _;
 //!
 //! // Generate and persist a new keypair
 //! KeyStore::generate("my-mainnet-key").unwrap();
