@@ -18,6 +18,7 @@ AirSign lets you sign Solana transactions on a device that has *never* touched t
 - [M-of-N Multisig](#m-of-n-multisig)
 - [FROST Threshold Signatures](#frost-threshold-signatures)
 - [Trustless DKG](#trustless-dkg)
+- [Squads v4 Multisig](#squads-v4-multisig)
 - [Ledger Hardware Wallet](#ledger-hardware-wallet)
 - [Cryptography](#cryptography)
 - [CI & Testing](#ci--testing)
@@ -472,10 +473,101 @@ All checks must pass before merging to `main`.
 
 ---
 
+## Squads v4 Multisig
+
+AirSign v3.0 integrates natively with the [Squads v4](https://squads.so) on-chain multisig program (`SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf`) via the `afterimage-squads` crate.  All instruction building is **fully offline** — no RPC call is needed until the final broadcast step.
+
+### Derive PDAs
+
+```bash
+airsign squads pda --create-key 4wTQ…
+# → { "multisig_pda": "…", "vault_pda": "…", "bump": 255 }
+```
+
+### Create a 2-of-3 multisig
+
+```bash
+airsign squads create \
+  --create-key 4wTQ… \
+  --members Alice…,voter:Bob…,Carol… \
+  --threshold 2 \
+  --memo "Team treasury"
+# → InstructionResult JSON (program_id, accounts[], data_b64)
+```
+
+Member permission prefixes:
+
+| Prefix | On-chain permissions |
+|---|---|
+| _(none)_ | Full — Proposer + Voter + Executor |
+| `voter:` | Voter only |
+| `initiator:` | Initiator (Proposer) only |
+| `executor:` | Executor only |
+
+### Approve a proposal via QR air-gap
+
+```bash
+# Online machine: build payload + transmit via QR
+airsign squads approve \
+  --multisig SQDS… --tx-index 7 --approver Alice… \
+  | airsign send -
+
+# Air-gapped machine: receive + sign
+airsign recv response.json
+airsign sign response.json --keypair keychain:alice-key
+```
+
+### Config transactions
+
+```bash
+# Add a member
+airsign squads add-member \
+  --multisig SQDS… --creator Alice… --tx-index 5 --member voter:Dave…
+
+# Remove a member
+airsign squads remove-member \
+  --multisig SQDS… --creator Alice… --tx-index 6 --member Bob…
+
+# Change threshold
+airsign squads change-threshold \
+  --multisig SQDS… --creator Alice… --tx-index 7 --threshold 3
+```
+
+### Crate: `afterimage-squads`
+
+```rust
+use afterimage_squads::{
+    multisig::{create_multisig_json, derive_pda_info},
+    types::{Member, MultisigConfig},
+};
+
+let config = MultisigConfig {
+    create_key: "4wTQ…".into(),
+    members: vec![
+        Member::full("Alice…"),
+        Member::voter("Bob…"),
+        Member::full("Carol…"),
+    ],
+    threshold: 2,
+    time_lock: 0,
+    memo: Some("Team treasury".into()),
+};
+let ix_json = create_multisig_json(&config)?;
+// ix_json.program_id  → "SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf"
+// ix_json.data_b64    → Anchor-discriminated Borsh payload (ready to sign)
+```
+
+### Web UI
+
+Open **tab 7 "🏛️ Squads v4"** in the signer web app for a full guided form with one-click CLI command copy, JSON preview, and a collapsible instruction reference table.
+
+---
+
 ## Roadmap
 
-- [ ] **Squads / SPL Governance integration** — emit partial signatures in a format consumable by the Squads v4 multisig program.
-- [ ] **Threshold signature scheme (FROST)** — replace sequential M-of-N with a non-interactive FROST round, producing a single aggregated signature.
+- [x] **Squads v4 integration** — `afterimage-squads` crate + `airsign squads` CLI — see [Squads v4 Multisig](#squads-v4-multisig).
+- [x] **FROST threshold signatures** — FROST RFC 9591, 2-round parallel threshold signing.
+- [x] **Trustless DKG** — FROST RFC 9591 distributed key generation without a trusted dealer.
 - [ ] **NFC channel** — alternative to QR codes for devices with NFC capability.
 - [ ] **Mobile companion app** — React Native app that acts as the air-gapped signer (airplane mode enforced).
 - [ ] **Formal security audit** — independent review of the cryptographic protocol and Rust implementation.

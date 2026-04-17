@@ -6,8 +6,9 @@ import { ReceivePage } from "./pages/ReceivePage.js";
 import { MultisigPage } from "./pages/MultisigPage.js";
 import { FrostPage } from "./pages/FrostPage.js";
 import DkgPage from "./pages/DkgPage.js";
+import SquadsPage from "./pages/SquadsPage.js";
 
-type Tab = "send" | "sign" | "receive" | "multisig" | "frost" | "dkg";
+type Tab = "send" | "sign" | "receive" | "multisig" | "frost" | "dkg" | "squads";
 
 const TABS: { id: Tab; label: string; emoji: string }[] = [
   { id: "send",     label: "1 · Prepare & Send",       emoji: "📡" },
@@ -16,6 +17,7 @@ const TABS: { id: Tab; label: string; emoji: string }[] = [
   { id: "multisig", label: "4 · M-of-N Multisig",       emoji: "🔏" },
   { id: "frost",    label: "5 · FROST Threshold",       emoji: "❄️" },
   { id: "dkg",      label: "6 · Trustless DKG",         emoji: "🗝️" },
+  { id: "squads",   label: "7 · Squads v4",             emoji: "🏛️" },
 ];
 
 export function App() {
@@ -104,6 +106,7 @@ export function App() {
       {tab === "multisig" && <MultisigPage />}
       {tab === "frost" && <FrostPage />}
       {tab === "dkg" && <DkgPage />}
+      {tab === "squads" && <SquadsPage />}
     </div>
   );
 }

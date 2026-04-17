@@ -15,6 +15,7 @@ path = "src/main.rs"
 afterimage-core    = { workspace = true }
 afterimage-optical = { workspace = true }
 afterimage-solana  = { path = "../afterimage-solana" }
+afterimage-squads  = { workspace = true }
 
 clap        = { workspace = true }
 rpassword   = { workspace = true }

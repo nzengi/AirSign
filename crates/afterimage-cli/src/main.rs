@@ -34,7 +34,7 @@ use afterimage_solana::{
     ledger_apdu::DerivationPath,
     preflight::{PreflightChecker, resolve_cluster_url},
     signer::{AirSigner, summarize_request, default_nonce_store_path},
-    wallet::{WatchWallet, TransactionBuilder},
+    wallet::WatchWallet,
     SignRequest,
     MultiSignRequest, MultiSignResponse, MultiSigner,
     build_multisig_session, advance_round_from,
@@ -245,6 +245,23 @@ enum Commands {
         #[arg(long, default_value = "devnet")]
         cluster: String,
     },
+
+    /// Squads v4 multisig helpers — build instructions offline, sign via AirSign QR.
+    ///
+    /// All sub-commands output JSON to stdout (pipe to a file or `airsign send`).
+    ///
+    /// ## Examples
+    ///
+    /// ```text
+    /// airsign squads pda  --create-key 4wTQ…
+    /// airsign squads create --create-key 4wTQ… --members Alice,Bob,Carol --threshold 2
+    /// airsign squads approve --multisig SQDS… --tx-index 7 --approver Alice…
+    /// airsign squads propose --multisig SQDS… --creator Alice… --tx-index 1 --message <B64>
+    /// airsign squads add-member --multisig SQDS… --creator Alice… --tx-index 5 --member Carol…
+    /// airsign squads change-threshold --multisig SQDS… --creator Alice… --tx-index 6 --threshold 3
+    /// ```
+    #[command(subcommand)]
+    Squads(SquadsCommands),
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
@@ -298,6 +315,8 @@ fn main() {
             response_file,
             cluster,
         } => cmd_broadcast(response_file, cluster),
+
+        Commands::Squads(sub) => cmd_squads(sub),
     }
 }
 
@@ -1627,4 +1646,307 @@ fn resolve_password(opt: Option<String>, prompt: &str) -> String {
         eprintln!("error reading password: {e}");
         std::process::exit(1);
     })
+}
+
+// ─── squads sub-commands ──────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum SquadsCommands {
+    /// Derive the multisig and vault PDAs for a create key.
+    ///
+    /// Prints a JSON object with `multisig_pda`, `vault_pda`, and `bump`.
+    Pda {
+        /// The ephemeral create key (base58 pubkey) used as a PDA seed.
+        #[arg(long, value_name = "PUBKEY")]
+        create_key: String,
+    },
+
+    /// Build a `multisig_create_v2` instruction JSON.
+    ///
+    /// Prints an InstructionResult JSON to stdout.
+    Create {
+        /// The ephemeral create key (base58 pubkey).
+        #[arg(long, value_name = "PUBKEY")]
+        create_key: String,
+
+        /// Comma-separated member pubkeys.  All receive full permissions by default.
+        /// Prefix a pubkey with `voter:` to grant Voter-only permissions, or
+        /// `initiator:` for Initiator-only, or `executor:` for Executor-only.
+        #[arg(long, value_name = "PUBKEY,...")]
+        members: String,
+
+        /// Number of approvals required (M in M-of-N).
+        #[arg(long, value_name = "N")]
+        threshold: u16,
+
+        /// Time-lock in seconds (0 = no lock).
+        #[arg(long, default_value_t = 0)]
+        time_lock: u32,
+
+        /// Optional memo attached to the instruction.
+        #[arg(long, value_name = "TEXT")]
+        memo: Option<String>,
+    },
+
+    /// Build a `proposal_approve` instruction and wrap it in an AirSign payload JSON.
+    ///
+    /// The payload JSON can be piped to `airsign send` for QR transmission to
+    /// the air-gapped signer, which decodes it and signs the embedded transaction.
+    Approve {
+        /// Squads multisig PDA (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        multisig: String,
+
+        /// Index of the proposal / vault transaction to approve.
+        #[arg(long, value_name = "N")]
+        tx_index: u64,
+
+        /// Public key of the approving member (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        approver: String,
+
+        /// Optional memo.
+        #[arg(long, value_name = "TEXT")]
+        memo: Option<String>,
+    },
+
+    /// Build a `vault_transaction_create` + `proposal_create` instruction pair JSON.
+    ///
+    /// The inner message is supplied as a base64-encoded bincode `Message`.
+    Propose {
+        /// Squads multisig PDA (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        multisig: String,
+
+        /// Creator/fee-payer public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        creator: String,
+
+        /// Transaction index for the new proposal (must be next unused index).
+        #[arg(long, value_name = "N")]
+        tx_index: u64,
+
+        /// Base64-encoded bincode `solana_sdk::message::Message` to embed.
+        #[arg(long, value_name = "B64")]
+        message: String,
+
+        /// Vault index (default: 0).
+        #[arg(long, default_value_t = 0)]
+        vault_index: u8,
+
+        /// Optional memo.
+        #[arg(long, value_name = "TEXT")]
+        memo: Option<String>,
+    },
+
+    /// Build a config transaction that adds a member.
+    #[command(name = "add-member")]
+    AddMember {
+        /// Squads multisig PDA (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        multisig: String,
+
+        /// Creator/fee-payer public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        creator: String,
+
+        /// Config transaction index.
+        #[arg(long, value_name = "N")]
+        tx_index: u64,
+
+        /// New member public key (base58).  Use `voter:`, `initiator:`, or
+        /// `executor:` prefix for limited permissions; no prefix = full.
+        #[arg(long, value_name = "PUBKEY")]
+        member: String,
+
+        /// Optional memo.
+        #[arg(long, value_name = "TEXT")]
+        memo: Option<String>,
+    },
+
+    /// Build a config transaction that removes a member.
+    #[command(name = "remove-member")]
+    RemoveMember {
+        /// Squads multisig PDA (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        multisig: String,
+
+        /// Creator/fee-payer public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        creator: String,
+
+        /// Config transaction index.
+        #[arg(long, value_name = "N")]
+        tx_index: u64,
+
+        /// Public key of the member to remove (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        member: String,
+
+        /// Optional memo.
+        #[arg(long, value_name = "TEXT")]
+        memo: Option<String>,
+    },
+
+    /// Build a config transaction that changes the approval threshold.
+    #[command(name = "change-threshold")]
+    ChangeThreshold {
+        /// Squads multisig PDA (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        multisig: String,
+
+        /// Creator/fee-payer public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        creator: String,
+
+        /// Config transaction index.
+        #[arg(long, value_name = "N")]
+        tx_index: u64,
+
+        /// New threshold value.
+        #[arg(long, value_name = "N")]
+        threshold: u16,
+
+        /// Optional memo.
+        #[arg(long, value_name = "TEXT")]
+        memo: Option<String>,
+    },
+}
+
+// ─── cmd_squads ───────────────────────────────────────────────────────────────
+
+fn cmd_squads(sub: SquadsCommands) {
+    use afterimage_squads::{
+        adapter::{build_airsign_payload, payload_to_json},
+        config_tx::{add_member_ix, change_threshold_ix, remove_member_ix},
+        multisig::{create_multisig_json, derive_pda_info, instruction_to_json},
+        types::{ApprovalRequest, Member, MultisigConfig, VaultTransactionRequest},
+        vault_tx::{proposal_create_ix, vault_transaction_create_ix},
+    };
+    use solana_sdk::hash::Hash;
+
+    match sub {
+        // ── pda ───────────────────────────────────────────────────────────────
+        SquadsCommands::Pda { create_key } => {
+            let info = derive_pda_info(&create_key).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            println!("{}", serde_json::to_string_pretty(&info).unwrap());
+        }
+
+        // ── create ────────────────────────────────────────────────────────────
+        SquadsCommands::Create { create_key, members, threshold, time_lock, memo } => {
+            let parsed_members: Vec<Member> = members
+                .split(',')
+                .map(|s| {
+                    let s = s.trim();
+                    if let Some(k) = s.strip_prefix("voter:") {
+                        Member::voter(k)
+                    } else if let Some(k) = s.strip_prefix("initiator:") {
+                        Member::initiator(k)
+                    } else if let Some(k) = s.strip_prefix("executor:") {
+                        Member::executor(k)
+                    } else {
+                        Member::full(s)
+                    }
+                })
+                .collect();
+
+            let config = MultisigConfig {
+                create_key,
+                members: parsed_members,
+                threshold,
+                time_lock,
+                memo,
+            };
+            let result = create_multisig_json(&config).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            println!("{}", serde_json::to_string_pretty(&result).unwrap());
+        }
+
+        // ── approve ───────────────────────────────────────────────────────────
+        SquadsCommands::Approve { multisig, tx_index, approver, memo } => {
+            let req = ApprovalRequest {
+                multisig_pda: multisig,
+                transaction_index: tx_index,
+                approver,
+                memo,
+            };
+            let payload = build_airsign_payload(&req, Hash::default()).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            eprintln!("[airsign] squads approve: {}", payload.label);
+            eprintln!("[airsign]   pipe this JSON to `airsign send` for QR transmission");
+            println!("{}", payload_to_json(&payload).unwrap());
+        }
+
+        // ── propose ───────────────────────────────────────────────────────────
+        SquadsCommands::Propose { multisig, creator, tx_index, message, vault_index, memo } => {
+            let req = VaultTransactionRequest {
+                multisig_pda: multisig.clone(),
+                creator: creator.clone(),
+                vault_index,
+                transaction_message_b64: message,
+                ephemeral_signers: 0,
+                memo: memo.clone(),
+            };
+            let vault_ix = vault_transaction_create_ix(&req, tx_index).unwrap_or_else(|e| {
+                eprintln!("error building vault_transaction_create: {e}");
+                std::process::exit(1);
+            });
+            let proposal_ix = proposal_create_ix(&multisig, &creator, tx_index, false)
+                .unwrap_or_else(|e| {
+                    eprintln!("error building proposal_create: {e}");
+                    std::process::exit(1);
+                });
+
+            let output = serde_json::json!({
+                "vault_transaction_create": instruction_to_json(&vault_ix),
+                "proposal_create": instruction_to_json(&proposal_ix),
+            });
+            println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        }
+
+        // ── add-member ────────────────────────────────────────────────────────
+        SquadsCommands::AddMember { multisig, creator, tx_index, member, memo } => {
+            let m = if let Some(k) = member.strip_prefix("voter:") {
+                Member::voter(k)
+            } else if let Some(k) = member.strip_prefix("initiator:") {
+                Member::initiator(k)
+            } else if let Some(k) = member.strip_prefix("executor:") {
+                Member::executor(k)
+            } else {
+                Member::full(&member)
+            };
+            let ix = add_member_ix(&multisig, &creator, tx_index, m, memo).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            println!("{}", serde_json::to_string_pretty(&instruction_to_json(&ix)).unwrap());
+        }
+
+        // ── remove-member ─────────────────────────────────────────────────────
+        SquadsCommands::RemoveMember { multisig, creator, tx_index, member, memo } => {
+            let ix = remove_member_ix(&multisig, &creator, tx_index, &member, memo)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+            println!("{}", serde_json::to_string_pretty(&instruction_to_json(&ix)).unwrap());
+        }
+
+        // ── change-threshold ──────────────────────────────────────────────────
+        SquadsCommands::ChangeThreshold { multisig, creator, tx_index, threshold, memo } => {
+            let ix = change_threshold_ix(&multisig, &creator, tx_index, threshold, memo)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+            println!("{}", serde_json::to_string_pretty(&instruction_to_json(&ix)).unwrap());
+        }
+    }
 }

@@ -8,6 +8,7 @@ members = [
     "crates/afterimage-wasm",
     "crates/afterimage-frost",
     "crates/afterimage-dkg",
+    "crates/afterimage-squads",
 ]
 
 [workspace.package]
@@ -82,6 +83,9 @@ keyring = { version = "3", features = ["apple-native", "sync-secret-service", "w
 # ── Hardware Wallet (Ledger HID) ──────────────────────────────────────────────
 hidapi = { version = "2", default-features = false, features = ["linux-static-hidraw"] }
 
+# ── Borsh (Anchor / Squads serialization) ─────────────────────────────────────
+borsh = { version = "1.5", features = ["derive"] }
+
 # ── General utilities ─────────────────────────────────────────────────────────
 base64  = "0.22"
 bincode = "1.3"
@@ -92,6 +96,7 @@ afterimage-core    = { path = "crates/afterimage-core" }
 afterimage-optical = { path = "crates/afterimage-optical" }
 afterimage-frost   = { path = "crates/afterimage-frost" }
 afterimage-dkg     = { path = "crates/afterimage-dkg" }
+afterimage-squads  = { path = "crates/afterimage-squads" }
 
 [profile.release]
 opt-level     = 3

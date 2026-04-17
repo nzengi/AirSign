@@ -1,5 +1,32 @@
 # Changelog
 
+## [3.0.0] — 2026-04-18
+
+### Added
+- **`crates/afterimage-squads`** — new Rust crate: fully offline Squads v4 multisig instruction builder
+  - `multisig` — `multisig_create_v2` instruction builder with Anchor discriminator, Borsh serialisation, PDA derivation (`multisig` + `vault` seeds), and full member-permission bitmask support (`Full` / `Voter` / `Initiator` / `Executor`)
+  - `vault_tx` — `vault_transaction_create` and `proposal_create` instruction builders
+  - `config_tx` — `config_transaction_create` builders for `AddMember`, `RemoveMember`, and `ChangeThreshold` actions
+  - `adapter` — `build_airsign_payload` wraps a `proposal_approve` instruction into a signed `AirSignPayload` JSON ready for `airsign send`
+  - `types` — `MultisigConfig`, `Member` (with `::full/voter/initiator/executor()` constructors), `ApprovalRequest`, `VaultTransactionRequest`, `InstructionResult`, `MultisigPdaInfo`
+  - `error` — typed `SquadsError` enum (EmptyMembers, InvalidThreshold, DuplicateMember, InvalidPubkey, Serialization, InstructionBuild, PdaDerivation)
+  - 64 unit tests covering discriminator correctness, PDA determinism, instruction structure, full validation matrix, and adapter roundtrips
+- **`airsign squads` CLI sub-command** — 7 operations wired to `afterimage-squads`:
+  - `airsign squads pda  --create-key <KEY>`
+  - `airsign squads create --create-key … --members … --threshold N`
+  - `airsign squads approve --multisig … --tx-index N --approver …`
+  - `airsign squads propose --multisig … --creator … --tx-index N --message <B64>`
+  - `airsign squads add-member --multisig … --creator … --tx-index N --member [voter:|initiator:|executor:]<KEY>`
+  - `airsign squads remove-member --multisig … --creator … --tx-index N --member <KEY>`
+  - `airsign squads change-threshold --multisig … --creator … --tx-index N --threshold N`
+- **`apps/signer-web` — tab 7 "🏛️ Squads v4"**
+  - `SquadsPage.tsx` — 7-tab form UI (PDAs · Create · Approve · Propose · Add Member · Remove Member · Change Threshold)
+  - Each tab shows the exact CLI command, offers one-click copy, and renders a JSON preview
+  - Permission prefix picker (`Full / Voter / Initiator / Executor`) on member forms
+  - Collapsible Squads v4 program reference table with instruction → discriminator mapping
+
+---
+
 ## [2.1.0] — 2026-04-18
 
 ### Added
