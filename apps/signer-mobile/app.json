@@ -47,8 +47,12 @@
         {
           "faceIDPermission": "AirSign uses Face ID to protect your signing keys."
         }
-      ]
+      ],
+      "expo-local-authentication",
+      "expo-asset",
+      "expo-font"
     ],
+    "newArchEnabled": true,
     "experiments": {
       "typedRoutes": true
     },

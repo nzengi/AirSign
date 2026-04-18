@@ -15,3 +15,4 @@ packages/react/dist/
 
 # Demo app
 apps/signer-mobile/modules/airsign-core/.gradle/
+apps/signer-mobile/.expo/

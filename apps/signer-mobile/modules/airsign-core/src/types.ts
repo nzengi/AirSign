@@ -54,6 +54,12 @@ export interface FountainDecodeResult {
 
 export interface IAirSignCore {
   generateKeypair(): Promise<Keypair>;
+  /** Import an existing Ed25519 private key (base58-encoded 32-byte seed or 64-byte secret) */
+  importKeypair(privateKeyBase58: string): Promise<Keypair>;
+  /** Export the base58-encoded private key seed for backup — use with extreme caution */
+  exportPrivateKey(id: string): Promise<string>;
+  /** Rename the human-readable label for an existing keypair */
+  renameKeypair(id: string, newLabel: string): Promise<void>;
   deleteKeypair(id: string): Promise<void>;
   listKeypairIds(): Promise<string[]>;
   getPublicKey(id: string): Promise<Keypair>;

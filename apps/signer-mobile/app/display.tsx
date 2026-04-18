@@ -1,34 +1,67 @@
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import React, { useEffect, useState } from "react";
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import QrAnimator from "../src/components/QrAnimator";
-
-/**
- * Stub: fountain-encode signed bytes into base64 QR frames.
- * Real implementation calls airsign_core.fountain_encode(signedBytes).
- */
-function stubFountainFrames(): string[] {
-  // Return a small set of placeholder frames so the animator is exercisable
-  // without the native module.
-  const payload = btoa(
-    JSON.stringify({ sig: "PLACEHOLDER_SIGNATURE_BASE64", version: 1 })
-  );
-  return Array.from({ length: 8 }, (_, i) =>
-    btoa(JSON.stringify({ idx: i, total: 8, data: payload }))
-  );
-}
+import AirSignCore from "../src/native/AirSignCore";
 
 export default function DisplayScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{ framesJson?: string; signedPayload?: string; cluster?: string }>();
+  const cluster = params.cluster ?? "devnet";
   const [frames, setFrames] = useState<string[]>([]);
   const [fps, setFps] = useState(5);
+  const [status, setStatus] = useState("Preparing frames…");
 
   useEffect(() => {
-    setFrames(stubFountainFrames());
-  }, []);
+    void (async () => {
+      // Priority 1: frames already computed by scan.tsx and passed as JSON
+      if (params.framesJson) {
+        try {
+          const parsed = JSON.parse(params.framesJson) as string[];
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setFrames(parsed);
+            setStatus("");
+            return;
+          }
+        } catch {
+          // fall through
+        }
+      }
+
+      // Priority 2: raw signed payload passed — encode it here
+      if (params.signedPayload) {
+        try {
+          setStatus("Encoding fountain frames…");
+          const result = await AirSignCore.fountainEncode(params.signedPayload, 16);
+          const enc = result as { frames?: string[] };
+          const computed = enc.frames ?? [params.signedPayload];
+          setFrames(computed);
+          setStatus("");
+          return;
+        } catch (err) {
+          setStatus(`Encode error: ${String(err)}`);
+          return;
+        }
+      }
+
+      // Fallback: no data — show error
+      setStatus("No signed transaction data received.");
+    })();
+  }, [params.framesJson, params.signedPayload]);
+
+  const clusterColor =
+    cluster === "mainnet-beta" ? "#ef4444" : cluster === "testnet" ? "#f59e0b" : "#3b82f6";
+  const clusterLabel =
+    cluster === "mainnet-beta" ? "Mainnet" : cluster === "testnet" ? "Testnet" : "Devnet";
 
   return (
     <View style={styles.container}>
+      {/* Cluster badge */}
+      <View style={[styles.clusterBadge, { borderColor: clusterColor }]}>
+        <View style={[styles.clusterDot, { backgroundColor: clusterColor }]} />
+        <Text style={[styles.clusterText, { color: clusterColor }]}>{clusterLabel}</Text>
+      </View>
+
       <Text style={styles.title}>Scan with the online machine</Text>
       <Text style={styles.subtitle}>
         Hold this screen towards the camera on your online computer.{"\n"}
@@ -40,7 +73,7 @@ export default function DisplayScreen() {
           <QrAnimator frames={frames} frameIntervalMs={Math.round(1000 / fps)} size={300} />
         ) : (
           <View style={styles.placeholder}>
-            <Text style={styles.placeholderText}>Preparing frames…</Text>
+            <Text style={styles.placeholderText}>{status || "Preparing…"}</Text>
           </View>
         )}
       </View>
@@ -63,7 +96,9 @@ export default function DisplayScreen() {
         </View>
       </View>
 
-      <Text style={styles.frameCount}>{frames.length} fountain frames</Text>
+      {frames.length > 0 && (
+        <Text style={styles.frameCount}>{frames.length} fountain frames</Text>
+      )}
 
       <TouchableOpacity style={styles.doneButton} onPress={() => router.replace("/")}>
         <Text style={styles.doneText}>Done — Return Home</Text>
@@ -104,10 +139,12 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     alignItems: "center",
     justifyContent: "center",
+    padding: 16,
   },
   placeholderText: {
     color: "#4b5563",
     fontSize: 14,
+    textAlign: "center",
   },
   fpsRow: {
     flexDirection: "row",
@@ -143,6 +180,18 @@ const styles = StyleSheet.create({
     color: "#60a5fa",
     fontWeight: "600",
   },
+  clusterBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderWidth: 1,
+    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    marginBottom: 16,
+  },
+  clusterDot: { width: 7, height: 7, borderRadius: 4 },
+  clusterText: { fontSize: 12, fontWeight: "700", letterSpacing: 0.5 },
   frameCount: {
     color: "#374151",
     fontSize: 11,

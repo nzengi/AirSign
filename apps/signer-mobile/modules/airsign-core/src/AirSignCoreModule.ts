@@ -494,6 +494,69 @@ const AirSignCoreModuleImpl: IAirSignCore = {
     return { id, pubkeyHex, pubkeyBase58 };
   },
 
+  async importKeypair(privateKeyBase58: string): Promise<Keypair> {
+    // Accept either 32-byte seed (base58) or 64-byte secret (nacl format — first 32 bytes are seed)
+    const decoded = base58Decode(privateKeyBase58.trim());
+    let seedBytes: Uint8Array;
+    if (decoded.length === 32) {
+      seedBytes = decoded;
+    } else if (decoded.length === 64) {
+      seedBytes = decoded.slice(0, 32);
+    } else {
+      throw new Error(
+        `Invalid private key length: expected 32 or 64 bytes, got ${decoded.length}`
+      );
+    }
+
+    const pair = nacl.sign.keyPair.fromSeed(seedBytes);
+    const pubkeyHex = toHex(pair.publicKey);
+    const pubkeyBase58 = base58Encode(pair.publicKey);
+
+    // Check for duplicate (same public key already imported)
+    const existingIds = await getKeypairIndex();
+    for (const existingId of existingIds) {
+      const raw = await SecureStore.getItemAsync(`${KEYPAIR_PREFIX}${existingId}`);
+      if (raw) {
+        const stored = JSON.parse(raw) as { pubkeyHex: string };
+        if (stored.pubkeyHex === pubkeyHex) {
+          throw new Error("This key is already in your keystore.");
+        }
+      }
+    }
+
+    // Generate unique ID
+    const idBytes = await ExpoCrypto.getRandomBytesAsync(16);
+    const id = toHex(new Uint8Array(idBytes));
+
+    await SecureStore.setItemAsync(
+      `${KEYPAIR_PREFIX}${id}`,
+      JSON.stringify({ seed: toHex(seedBytes), pubkeyHex, pubkeyBase58 })
+    );
+
+    const index = await getKeypairIndex();
+    index.push(id);
+    await saveKeypairIndex(index);
+
+    return { id, pubkeyHex, pubkeyBase58 };
+  },
+
+  async exportPrivateKey(id: string): Promise<string> {
+    const raw = await SecureStore.getItemAsync(`${KEYPAIR_PREFIX}${id}`);
+    if (!raw) throw new Error(`Keypair not found: ${id}`);
+    const { seed } = JSON.parse(raw) as { seed: string };
+    // Return the 32-byte seed as base58 (standard Solana private key format)
+    return base58Encode(fromHex(seed));
+  },
+
+  async renameKeypair(id: string, newLabel: string): Promise<void> {
+    // Verify the keypair exists
+    const raw = await SecureStore.getItemAsync(`${KEYPAIR_PREFIX}${id}`);
+    if (!raw) throw new Error(`Keypair not found: ${id}`);
+    // Label is stored in the external label map (keystore.tsx: airsign_key_labels)
+    // This method is a no-op at the crypto layer — label management is UI-layer concern.
+    // Exposed on the interface for native bridge parity; JS callers use saveLabelMap directly.
+  },
+
   async deleteKeypair(id: string): Promise<void> {
     await SecureStore.deleteItemAsync(`${KEYPAIR_PREFIX}${id}`);
     const index = await getKeypairIndex();

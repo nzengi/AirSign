@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import * as SecureStore from "expo-secure-store";
+import React, { useEffect, useState } from "react";
 import {
   ScrollView,
   StyleSheet,
@@ -7,6 +8,62 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+
+// ── Storage key & defaults ─────────────────────────────────────────────────
+
+const SETTINGS_KEY = "airsign_settings_v1";
+const CLUSTER_PREF_KEY = "airsign_preferred_cluster";
+
+type ClusterOption = "mainnet-beta" | "devnet" | "testnet";
+const CLUSTER_OPTIONS: ClusterOption[] = ["mainnet-beta", "devnet", "testnet"];
+const CLUSTER_LABELS: Record<ClusterOption, string> = {
+  "mainnet-beta": "Mainnet",
+  devnet: "Devnet",
+  testnet: "Testnet",
+};
+const CLUSTER_COLORS: Record<ClusterOption, string> = {
+  "mainnet-beta": "#ef4444",
+  devnet: "#3b82f6",
+  testnet: "#f59e0b",
+};
+
+interface AppSettings {
+  fps: number;
+  qrSize: number;
+  frostThreshold: number;
+  frostTotal: number;
+  requireBiometrics: boolean;
+  showRawData: boolean;
+}
+
+const DEFAULTS: AppSettings = {
+  fps: 5,
+  qrSize: 280,
+  frostThreshold: 2,
+  frostTotal: 3,
+  requireBiometrics: true,
+  showRawData: false,
+};
+
+async function loadSettings(): Promise<AppSettings> {
+  try {
+    const raw = await SecureStore.getItemAsync(SETTINGS_KEY);
+    if (!raw) return DEFAULTS;
+    return { ...DEFAULTS, ...(JSON.parse(raw) as Partial<AppSettings>) };
+  } catch {
+    return DEFAULTS;
+  }
+}
+
+async function saveSettings(s: AppSettings): Promise<void> {
+  try {
+    await SecureStore.setItemAsync(SETTINGS_KEY, JSON.stringify(s));
+  } catch {
+    // best-effort
+  }
+}
+
+// ── StepperRow component ───────────────────────────────────────────────────
 
 interface RowProps {
   label: string;
@@ -36,13 +93,56 @@ function StepperRow({ label, value, onInc, onDec, unit = "" }: RowProps) {
   );
 }
 
+// ── Main screen ───────────────────────────────────────────────────────────
+
 export default function SettingsScreen() {
-  const [fps, setFps] = useState(5);
-  const [qrSize, setQrSize] = useState(280);
-  const [frostThreshold, setFrostThreshold] = useState(2);
-  const [frostTotal, setFrostTotal] = useState(3);
-  const [requireBiometrics, setRequireBiometrics] = useState(true);
-  const [showRawData, setShowRawData] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [fps, setFps] = useState(DEFAULTS.fps);
+  const [qrSize, setQrSize] = useState(DEFAULTS.qrSize);
+  const [frostThreshold, setFrostThreshold] = useState(DEFAULTS.frostThreshold);
+  const [frostTotal, setFrostTotal] = useState(DEFAULTS.frostTotal);
+  const [requireBiometrics, setRequireBiometrics] = useState(DEFAULTS.requireBiometrics);
+  const [showRawData, setShowRawData] = useState(DEFAULTS.showRawData);
+  const [cluster, setCluster] = useState<ClusterOption>("devnet");
+
+  // ── Load persisted settings on mount ────────────────────────────────────
+
+  useEffect(() => {
+    void (async () => {
+      const s = await loadSettings();
+      setFps(s.fps);
+      setQrSize(s.qrSize);
+      setFrostThreshold(s.frostThreshold);
+      setFrostTotal(s.frostTotal);
+      setRequireBiometrics(s.requireBiometrics);
+      setShowRawData(s.showRawData);
+      // Load cluster separately
+      const storedCluster = await SecureStore.getItemAsync(CLUSTER_PREF_KEY);
+      if (storedCluster && CLUSTER_OPTIONS.includes(storedCluster as ClusterOption)) {
+        setCluster(storedCluster as ClusterOption);
+      }
+      setReady(true);
+    })();
+  }, []);
+
+  // ── Persist whenever any value changes (after initial load) ─────────────
+
+  useEffect(() => {
+    if (!ready) return;
+    void saveSettings({
+      fps,
+      qrSize,
+      frostThreshold,
+      frostTotal,
+      requireBiometrics,
+      showRawData,
+    });
+  }, [ready, fps, qrSize, frostThreshold, frostTotal, requireBiometrics, showRawData]);
+
+  const handleClusterChange = (c: ClusterOption) => {
+    setCluster(c);
+    void SecureStore.setItemAsync(CLUSTER_PREF_KEY, c);
+  };
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
@@ -53,16 +153,16 @@ export default function SettingsScreen() {
           label="Animation speed"
           value={String(fps)}
           unit=" fps"
-          onInc={() => setFps((v: number) => Math.min(v + 1, 30))}
-          onDec={() => setFps((v: number) => Math.max(v - 1, 1))}
+          onInc={() => setFps((v) => Math.min(v + 1, 30))}
+          onDec={() => setFps((v) => Math.max(v - 1, 1))}
         />
         <View style={styles.divider} />
         <StepperRow
           label="QR code size"
           value={String(qrSize)}
           unit=" px"
-          onInc={() => setQrSize((v: number) => Math.min(v + 20, 400))}
-          onDec={() => setQrSize((v: number) => Math.max(v - 20, 160))}
+          onInc={() => setQrSize((v) => Math.min(v + 20, 400))}
+          onDec={() => setQrSize((v) => Math.max(v - 20, 160))}
         />
       </View>
 
@@ -72,16 +172,16 @@ export default function SettingsScreen() {
         <StepperRow
           label="Threshold (t)"
           value={String(frostThreshold)}
-          onInc={() => setFrostThreshold((v: number) => Math.min(v + 1, frostTotal))}
-          onDec={() => setFrostThreshold((v: number) => Math.max(v - 1, 2))}
+          onInc={() => setFrostThreshold((v) => Math.min(v + 1, frostTotal))}
+          onDec={() => setFrostThreshold((v) => Math.max(v - 1, 2))}
         />
         <View style={styles.divider} />
         <StepperRow
           label="Participants (n)"
           value={String(frostTotal)}
-          onInc={() => setFrostTotal((v: number) => Math.min(v + 1, 10))}
+          onInc={() => setFrostTotal((v) => Math.min(v + 1, 10))}
           onDec={() =>
-            setFrostTotal((v: number) => {
+            setFrostTotal((v) => {
               const next = Math.max(v - 1, frostThreshold);
               return next;
             })
@@ -124,6 +224,37 @@ export default function SettingsScreen() {
             thumbColor="#ffffff"
           />
         </View>
+      </View>
+
+      {/* Network */}
+      <Text style={styles.sectionLabel}>NETWORK</Text>
+      <View style={styles.card}>
+        <View style={styles.clusterRow}>
+          {CLUSTER_OPTIONS.map((c, i) => (
+            <TouchableOpacity
+              key={c}
+              style={[
+                styles.clusterBtn,
+                cluster === c && { backgroundColor: CLUSTER_COLORS[c] + "33", borderColor: CLUSTER_COLORS[c] },
+                i === 0 && { borderTopLeftRadius: 10, borderBottomLeftRadius: 10 },
+                i === CLUSTER_OPTIONS.length - 1 && { borderTopRightRadius: 10, borderBottomRightRadius: 10 },
+              ]}
+              onPress={() => handleClusterChange(c)}
+            >
+              <View style={[styles.clusterDot, { backgroundColor: cluster === c ? CLUSTER_COLORS[c] : "#374151" }]} />
+              <Text style={[styles.clusterBtnText, cluster === c && { color: CLUSTER_COLORS[c] }]}>
+                {CLUSTER_LABELS[c]}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+        <Text style={styles.hint}>
+          {cluster === "mainnet-beta"
+            ? "⚠️  Mainnet — real SOL will be transferred"
+            : cluster === "testnet"
+            ? "Testnet — test tokens, no real value"
+            : "Devnet — development & testing"}
+        </Text>
       </View>
 
       {/* About */}
@@ -204,6 +335,26 @@ const styles = StyleSheet.create({
   },
   stepBtnText: { color: "#e5e7eb", fontSize: 20, lineHeight: 24 },
   stepValue: { color: "#e5e7eb", fontSize: 15, minWidth: 52, textAlign: "center" },
+  clusterRow: {
+    flexDirection: "row",
+    margin: 12,
+    borderRadius: 10,
+    overflow: "hidden",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "#1f2937",
+  },
+  clusterBtn: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 12,
+    gap: 6,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "#1f2937",
+  },
+  clusterDot: { width: 8, height: 8, borderRadius: 4 },
+  clusterBtnText: { color: "#6b7280", fontSize: 13, fontWeight: "600" },
   switchRow: {
     flexDirection: "row",
     alignItems: "center",

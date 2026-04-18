@@ -38,13 +38,16 @@ interface Props {
   children: React.ReactNode;
 }
 
-export default function AirplaneModeGuard({ children }: Props) {
+/**
+ * Inner guard — only rendered in production builds.
+ * Keeps hooks unconditional (Rules of Hooks compliant).
+ */
+function NetworkGuard({ children }: Props) {
   const [checking, setChecking] = useState(true);
   const [online, setOnline] = useState(false);
 
   const checkNetwork = useCallback(async () => {
     if (!Network) {
-      // No network module — assume offline (safe default)
       setOnline(false);
       setChecking(false);
       return;
@@ -55,14 +58,12 @@ export default function AirplaneModeGuard({ children }: Props) {
         state.isInternetReachable === true || state.isConnected === true;
       setOnline(reachable);
     } catch {
-      // Error querying network → assume offline (safe default)
       setOnline(false);
     } finally {
       setChecking(false);
     }
   }, []);
 
-  // Check on mount and whenever the app comes back to the foreground
   useEffect(() => {
     void checkNetwork();
 
@@ -76,7 +77,6 @@ export default function AirplaneModeGuard({ children }: Props) {
       }
     );
 
-    // Re-check every 5 seconds while the app is active
     const interval = setInterval(() => {
       void checkNetwork();
     }, 5000);
@@ -125,6 +125,19 @@ export default function AirplaneModeGuard({ children }: Props) {
   }
 
   return <>{children}</>;
+}
+
+/**
+ * Public wrapper.
+ * In development (Expo Go / Metro) the device is always online — skip the
+ * guard so developers can test without enabling airplane mode.
+ * In production builds __DEV__ is false and the real NetworkGuard runs.
+ */
+export default function AirplaneModeGuard({ children }: Props) {
+  if (__DEV__) {
+    return <>{children}</>;
+  }
+  return <NetworkGuard>{children}</NetworkGuard>;
 }
 
 const styles = StyleSheet.create({

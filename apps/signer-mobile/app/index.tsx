@@ -72,9 +72,38 @@ export default function HomeScreen() {
       <NavCard
         icon="🗝️"
         title="Key Management"
-        description="Generate, import, or delete Ed25519 signing keypairs"
+        description="Generate, import, export, or delete Ed25519 signing keypairs"
         accent="#a855f7"
         onPress={() => router.push("/keystore")}
+      />
+
+      <NavCard
+        icon="📋"
+        title="Signing History"
+        description="Audit log of every transaction signed on this device"
+        accent="#f59e0b"
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        onPress={() => router.push("/history" as any)}
+      />
+
+      <Text style={styles.sectionLabel}>ADVANCED</Text>
+
+      <NavCard
+        icon="❄️"
+        title="FROST Threshold Signing"
+        description="t-of-n threshold signatures via FROST RFC 9591 — Dealer, Participant & Sign"
+        accent="#60a5fa"
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        onPress={() => router.push("/frost" as any)}
+      />
+
+      <NavCard
+        icon="🏛️"
+        title="Squads Multisig"
+        description="Propose and approve Squads v4 vault transactions air-gapped"
+        accent="#a78bfa"
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        onPress={() => router.push("/squads" as any)}
       />
 
       <NavCard
