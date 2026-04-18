@@ -1,0 +1,30 @@
+// build.gradle — Android native module skeleton for AirSignCore.
+//
+// v1: The TypeScript layer (tweetnacl + expo-secure-store) handles all crypto.
+// v2 roadmap: implement AirSignCoreModule.kt to bridge the afterimage-wasm
+//             binary via a headless WebView → Android Keystore key storage.
+
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+apply plugin: 'expo-module'
+
+android {
+  namespace 'expo.modules.airsigncore'
+  compileSdkVersion safeExtGet("compileSdkVersion", 34)
+  defaultConfig {
+    minSdkVersion safeExtGet("minSdkVersion", 24)
+    targetSdkVersion safeExtGet("targetSdkVersion", 34)
+  }
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_11
+    targetCompatibility JavaVersion.VERSION_11
+  }
+  kotlinOptions {
+    jvmTarget = '11'
+  }
+}
+
+dependencies {
+  implementation project(':expo-modules-core')
+  implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8:${safeExtGet('kotlinVersion', '1.9.0')}"
+}
