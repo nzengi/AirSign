@@ -1,5 +1,55 @@
 # Changelog
 
+## [4.0.0] — 2026-04-18
+
+### Added
+
+- **`crates/afterimage-solana/src/broadcaster.rs`** — production-grade transaction broadcaster
+  - `Broadcaster::new(rpc_url)` with built-in cluster shorthand resolution
+  - `broadcast_response_json(json)` — decode a `SignResponse` JSON and submit via `sendTransaction`
+  - `broadcast_signed_transaction(tx)` — submit a pre-built `solana_sdk::transaction::Transaction`
+  - `get_latest_blockhash()` — fetch a fresh blockhash for transaction construction
+  - `airdrop(pubkey, lamports)` — request test SOL from the devnet / testnet faucet; rejects mainnet
+  - `explorer_url(sig)` / `solscan_url(sig)` — per-cluster deep-link helpers
+  - `cluster_name()` — human-readable cluster name derived from the RPC URL
+  - 15 offline unit tests: constructor setters, URL helpers, cluster names, airdrop mainnet guard, `BroadcastResult` field coverage
+
+- **`airsign broadcast` CLI sub-command** — submit a `SignResponse` JSON to any Solana cluster
+  ```text
+  airsign broadcast sign_response.json --cluster devnet
+  airsign broadcast sign_response.json --cluster mainnet
+  airsign broadcast sign_response.json --cluster https://my-rpc.example.com
+  ```
+
+- **`airsign airdrop` CLI sub-command** — fund a devnet/testnet address from the public faucet
+  ```text
+  airsign airdrop --to 4wTQ… --amount 2 --cluster devnet
+  airsign airdrop --to 4wTQ… --cluster testnet
+  ```
+  Mainnet is rejected with a clear error message.
+
+- **`airsign run` CLI sub-command** — end-to-end offline-signed transfer pipeline
+  ```text
+  airsign run --keypair ~/.config/solana/id.json --to 9xRz… --amount 0.01
+  airsign run --keypair id.json --to 9xRz… --amount 0.001 --cluster testnet
+  ```
+  Loads a 64-byte Solana CLI keypair, builds a `system_instruction::transfer`, signs locally, fetches a fresh blockhash, and broadcasts — all in one command.
+
+- **`apps/signer-web` ReceivePage — v2 (cluster + airdrop + explorer links)**
+  - Cluster selector: Devnet / Testnet / Mainnet-beta / Custom RPC — affects RPC call, Explorer link, Solscan link, and airdrop eligibility
+  - Balance display — live SOL balance fetched for the signer pubkey after QR scan
+  - 💧 Airdrop panel (devnet/testnet only) — requests up to 2 SOL from the public faucet, shows airdrop signature with Explorer link, auto-refreshes balance after 3 s
+  - 🚀 Broadcast panel — one-click `sendTransaction` to selected cluster, displays signature, "📋 Copy sig", "🔍 Explorer ↗", "📊 Solscan ↗" actions, retry button
+  - CLI equivalent snippet — shows matching `airsign broadcast` + `airsign airdrop` commands
+  - Full simulation/fallback mode when WASM is not loaded
+
+### Changed
+
+- `cmd_broadcast` in `crates/afterimage-cli/src/main.rs` now delegates cluster resolution to the shared `resolve_rpc_url()` helper (no duplicate match arms)
+- Shared CLI helpers extracted: `resolve_rpc_url`, `parse_pubkey_arg`, `sol_to_lamports`, `load_keypair_file` — reused across `broadcast`, `airdrop`, and `run`
+
+---
+
 ## [3.0.0] — 2026-04-18
 
 ### Added

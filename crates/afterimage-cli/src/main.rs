@@ -12,6 +12,8 @@
 //! airsign inspect   <TX_FILE|REQUEST_FILE> [--cluster devnet|mainnet] [--simulate]
 //! airsign prepare   transfer | token-transfer | stake-withdraw
 //! airsign broadcast <RESPONSE_FILE> [--cluster devnet|mainnet|testnet]
+//! airsign airdrop   --to <PUBKEY> [--amount SOL] [--cluster devnet|testnet]
+//! airsign run       --keypair <PATH> --to <PUBKEY> --amount <SOL> [--cluster devnet]
 //! airsign key       generate | import | show | list | export | delete
 //! airsign ledger    list | pubkey | version
 //! ```
@@ -246,6 +248,60 @@ enum Commands {
         cluster: String,
     },
 
+    /// Request a devnet / testnet SOL airdrop from the public faucet.
+    ///
+    /// Only works on devnet and testnet — mainnet airdrops are blocked.
+    ///
+    /// ## Example
+    ///
+    /// ```text
+    /// airsign airdrop --to 4wTQ… --amount 2
+    /// airsign airdrop --to 4wTQ… --cluster testnet
+    /// ```
+    Airdrop {
+        /// Recipient public key (base58).  Required.
+        #[arg(long, value_name = "PUBKEY")]
+        to: String,
+
+        /// Amount in SOL (default: 1.0).
+        #[arg(long, default_value_t = 1.0, value_name = "SOL")]
+        amount: f64,
+
+        /// Cluster: devnet (default) or testnet.  Mainnet is rejected.
+        #[arg(long, default_value = "devnet")]
+        cluster: String,
+    },
+
+    /// End-to-end demo pipeline: build transfer tx → sign with keypair → broadcast.
+    ///
+    /// Loads a Solana keypair file (64-byte JSON array, Solana CLI format),
+    /// builds a SOL system-transfer transaction, signs it locally, and submits
+    /// it to the specified cluster — all without leaving the terminal.
+    ///
+    /// ## Example
+    ///
+    /// ```text
+    /// airsign run --keypair ~/.config/solana/id.json --to 4wTQ… --amount 0.01
+    /// airsign run --keypair id.json --to 4wTQ… --amount 0.001 --cluster testnet
+    /// ```
+    Run {
+        /// Path to the Solana keypair JSON file (64-byte array).
+        #[arg(long, value_name = "PATH")]
+        keypair: PathBuf,
+
+        /// Recipient public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        to: String,
+
+        /// Amount in SOL (e.g. 0.01).  Converted to lamports automatically.
+        #[arg(long, value_name = "SOL")]
+        amount: f64,
+
+        /// Solana cluster: devnet | mainnet | testnet | <URL>.
+        #[arg(long, default_value = "devnet")]
+        cluster: String,
+    },
+
     /// Squads v4 multisig helpers — build instructions offline, sign via AirSign QR.
     ///
     /// All sub-commands output JSON to stdout (pipe to a file or `airsign send`).
@@ -315,6 +371,15 @@ fn main() {
             response_file,
             cluster,
         } => cmd_broadcast(response_file, cluster),
+
+        Commands::Airdrop { to, amount, cluster } => cmd_airdrop(to, amount, cluster),
+
+        Commands::Run {
+            keypair,
+            to,
+            amount,
+            cluster,
+        } => cmd_run(keypair, to, amount, cluster),
 
         Commands::Squads(sub) => cmd_squads(sub),
     }
@@ -1296,6 +1361,55 @@ fn cmd_inspect(file: PathBuf, cluster: Option<String>, simulate: bool) {
     std::process::exit(exit_code);
 }
 
+// ─── helpers ──────────────────────────────────────────────────────────────────
+
+/// Resolve cluster shorthand → RPC URL.
+fn resolve_rpc_url(cluster: &str) -> String {
+    match cluster {
+        "devnet"  => afterimage_solana::broadcaster::DEVNET_URL.to_owned(),
+        "testnet" => afterimage_solana::broadcaster::TESTNET_URL.to_owned(),
+        "mainnet" => afterimage_solana::broadcaster::MAINNET_URL.to_owned(),
+        custom    => custom.to_owned(),
+    }
+}
+
+/// Parse a base-58 pubkey, exit on error.
+fn parse_pubkey_arg(s: &str, flag: &str) -> solana_sdk::pubkey::Pubkey {
+    s.parse::<solana_sdk::pubkey::Pubkey>().unwrap_or_else(|e| {
+        eprintln!("error: invalid {flag} pubkey '{}': {e}", s);
+        std::process::exit(1);
+    })
+}
+
+/// Convert SOL (f64) to lamports.
+fn sol_to_lamports(sol: f64) -> u64 {
+    (sol * 1_000_000_000.0).round() as u64
+}
+
+/// Load a Solana keypair from a 64-byte JSON-array file.
+fn load_keypair_file(path: &PathBuf) -> solana_sdk::signature::Keypair {
+    let data = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("error: cannot read keypair file {:?}: {e}", path);
+        std::process::exit(1);
+    });
+    let bytes: Vec<u8> = serde_json::from_str(&data).unwrap_or_else(|e| {
+        eprintln!("error: invalid keypair JSON in {:?}: {e}", path);
+        std::process::exit(1);
+    });
+    if bytes.len() != 64 {
+        eprintln!(
+            "error: keypair must be 64 bytes (got {}). Export with `solana-keygen new` or \
+             `airsign key export`.",
+            bytes.len()
+        );
+        std::process::exit(1);
+    }
+    solana_sdk::signature::Keypair::from_bytes(&bytes).unwrap_or_else(|e| {
+        eprintln!("error: cannot decode keypair: {e}");
+        std::process::exit(1);
+    })
+}
+
 // ─── broadcast ────────────────────────────────────────────────────────────────
 
 fn cmd_broadcast(response_file: PathBuf, cluster: String) {
@@ -1304,12 +1418,7 @@ fn cmd_broadcast(response_file: PathBuf, cluster: String) {
         std::process::exit(1);
     });
 
-    let rpc_url = match cluster.as_str() {
-        "devnet"  => afterimage_solana::broadcaster::DEVNET_URL.to_owned(),
-        "testnet" => afterimage_solana::broadcaster::TESTNET_URL.to_owned(),
-        "mainnet" => afterimage_solana::broadcaster::MAINNET_URL.to_owned(),
-        custom    => custom.to_owned(),
-    };
+    let rpc_url = resolve_rpc_url(&cluster);
 
     eprintln!("[airsign] broadcasting to {}…", rpc_url);
 
@@ -1326,6 +1435,85 @@ fn cmd_broadcast(response_file: PathBuf, cluster: String) {
                 "[airsign] ✓ confirmed on {}\nhttps://explorer.solana.com/tx/{sig}{cluster_param}",
                 b.cluster
             );
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+// ─── airdrop ──────────────────────────────────────────────────────────────────
+
+fn cmd_airdrop(to: String, amount: f64, cluster: String) {
+    let rpc_url = resolve_rpc_url(&cluster);
+
+    if cluster == "mainnet" || rpc_url.contains("mainnet-beta") {
+        eprintln!("error: airdrop is not available on mainnet-beta");
+        std::process::exit(1);
+    }
+
+    let lamports = sol_to_lamports(amount);
+    eprintln!(
+        "[airsign] requesting airdrop of {} SOL ({} lamports) → {} on {}…",
+        amount, lamports, to, cluster
+    );
+
+    let b = Broadcaster::new(&rpc_url);
+    match b.airdrop(&to, lamports) {
+        Ok(sig) => {
+            println!("{sig}");
+            eprintln!("[airsign] ✓ airdrop submitted — sig: {sig}");
+            eprintln!("{}", b.explorer_url(&sig));
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+// ─── run (end-to-end pipeline) ────────────────────────────────────────────────
+
+fn cmd_run(keypair: PathBuf, to: String, amount: f64, cluster: String) {
+    use solana_sdk::{
+        message::Message,
+        signature::Signer,
+        system_instruction,
+        transaction::Transaction,
+    };
+
+    let rpc_url = resolve_rpc_url(&cluster);
+    let kp      = load_keypair_file(&keypair);
+    let from_pk = kp.pubkey();
+    let to_pk   = parse_pubkey_arg(&to, "--to");
+    let lamports = sol_to_lamports(amount);
+
+    eprintln!(
+        "[airsign] run: {} → {} | {} SOL ({} lamports) | cluster: {}",
+        from_pk, to_pk, amount, lamports, cluster
+    );
+
+    // Build unsigned transaction
+    let b = Broadcaster::new(&rpc_url);
+    let blockhash = b.get_latest_blockhash().unwrap_or_else(|e| {
+        eprintln!("error: cannot fetch latest blockhash: {e}");
+        std::process::exit(1);
+    });
+
+    let ix  = system_instruction::transfer(&from_pk, &to_pk, lamports);
+    let msg = Message::new(&[ix], Some(&from_pk));
+    let tx  = Transaction::new(&[&kp], msg, blockhash);
+
+    eprintln!("[airsign] ✓ transaction built and signed locally");
+    eprintln!("[airsign] broadcasting to {}…", rpc_url);
+
+    match b.broadcast_signed_transaction(&tx) {
+        Ok(sig) => {
+            println!("{sig}");
+            eprintln!("[airsign] ✓ confirmed!");
+            eprintln!("  Explorer : {}", b.explorer_url(&sig));
+            eprintln!("  Solscan  : {}", b.solscan_url(&sig));
         }
         Err(e) => {
             eprintln!("error: {e}");
@@ -1619,10 +1807,6 @@ fn parse_pubkey(s: &str, flag: &str) -> solana_sdk::pubkey::Pubkey {
         eprintln!("error: invalid pubkey for {flag} {:?}: {e}", s);
         std::process::exit(1);
     })
-}
-
-fn sol_to_lamports(sol: f64) -> u64 {
-    (sol * 1_000_000_000.0).round() as u64
 }
 
 fn write_tx_bin(tx: &solana_sdk::transaction::Transaction, path: &PathBuf) {

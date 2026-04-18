@@ -3,7 +3,8 @@
  *
  * 1. Camera scans the signed-response QR stream from the air-gapped machine
  * 2. WASM WasmRecvSession reassembles & decrypts the signed response
- * 3. User can broadcast the signed transaction to Solana devnet
+ * 3. User selects a cluster and broadcasts the signed transaction
+ * 4. Optionally requests a devnet / testnet airdrop for the signer address
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -28,7 +29,138 @@ interface BroadcastResult {
   error?: string;
 }
 
-/* ── Helpers ────────────────────────────────────────────────────────────── */
+/* ── Cluster config ─────────────────────────────────────────────────────── */
+type ClusterId = "devnet" | "testnet" | "mainnet" | "custom";
+
+interface ClusterConfig {
+  id: ClusterId;
+  label: string;
+  rpc: string;
+  explorerParam: string;   // ?cluster=… or ""
+  solscanParam: string;    // ?cluster=… or ""
+  airdropEnabled: boolean;
+}
+
+const CLUSTERS: ClusterConfig[] = [
+  {
+    id: "devnet",
+    label: "Devnet",
+    rpc: "https://api.devnet.solana.com",
+    explorerParam: "?cluster=devnet",
+    solscanParam: "?cluster=devnet",
+    airdropEnabled: true,
+  },
+  {
+    id: "testnet",
+    label: "Testnet",
+    rpc: "https://api.testnet.solana.com",
+    explorerParam: "?cluster=testnet",
+    solscanParam: "?cluster=testnet",
+    airdropEnabled: true,
+  },
+  {
+    id: "mainnet",
+    label: "Mainnet-beta",
+    rpc: "https://api.mainnet-beta.solana.com",
+    explorerParam: "",
+    solscanParam: "",
+    airdropEnabled: false,
+  },
+  {
+    id: "custom",
+    label: "Custom RPC",
+    rpc: "",
+    explorerParam: "?cluster=custom",
+    solscanParam: "",
+    airdropEnabled: false,
+  },
+];
+
+function getCluster(id: ClusterId, customUrl?: string): ClusterConfig {
+  const c = CLUSTERS.find((x) => x.id === id) ?? CLUSTERS[0];
+  if (id === "custom" && customUrl) return { ...c, rpc: customUrl };
+  return c;
+}
+
+/* ── RPC helpers ─────────────────────────────────────────────────────────── */
+async function broadcastToCluster(
+  txB64: string,
+  rpcUrl: string
+): Promise<BroadcastResult> {
+  const body = JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "sendTransaction",
+    params: [txB64, { encoding: "base64", preflightCommitment: "processed" }],
+  });
+
+  const res = await fetch(rpcUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+  });
+
+  if (!res.ok) throw new Error(`RPC HTTP ${res.status}`);
+
+  const json = (await res.json()) as {
+    result?: string;
+    error?: { message: string; data?: unknown };
+  };
+
+  if (json.error) return { signature: "", error: json.error.message };
+  return { signature: json.result ?? "" };
+}
+
+async function requestAirdrop(
+  pubkey: string,
+  lamports: number,
+  rpcUrl: string
+): Promise<string> {
+  const body = JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "requestAirdrop",
+    params: [pubkey, lamports],
+  });
+
+  const res = await fetch(rpcUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+  });
+
+  if (!res.ok) throw new Error(`RPC HTTP ${res.status}`);
+
+  const json = (await res.json()) as {
+    result?: string;
+    error?: { message: string };
+  };
+
+  if (json.error) throw new Error(json.error.message);
+  return json.result ?? "";
+}
+
+async function getBalance(pubkey: string, rpcUrl: string): Promise<number | null> {
+  try {
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "getBalance",
+      params: [pubkey, { commitment: "confirmed" }],
+    });
+    const res = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+    const json = (await res.json()) as { result?: { value: number } };
+    return typeof json.result?.value === "number" ? json.result.value / 1e9 : null;
+  } catch {
+    return null;
+  }
+}
+
+/* ── Helpers ─────────────────────────────────────────────────────────────── */
 function parseSignedResponse(raw: string): SignedResponse | null {
   try {
     const obj = JSON.parse(raw) as Record<string, unknown>;
@@ -43,34 +175,16 @@ function parseSignedResponse(raw: string): SignedResponse | null {
   return null;
 }
 
-const DEVNET_RPC = "https://api.devnet.solana.com";
+function explorerUrl(sig: string, cluster: ClusterConfig): string {
+  return `https://explorer.solana.com/tx/${sig}${cluster.explorerParam}`;
+}
 
-async function broadcastToDevnet(txB64: string): Promise<BroadcastResult> {
-  const body = JSON.stringify({
-    jsonrpc: "2.0",
-    id: 1,
-    method: "sendTransaction",
-    params: [
-      txB64,
-      { encoding: "base64", preflightCommitment: "processed" },
-    ],
-  });
+function solscanUrl(sig: string, cluster: ClusterConfig): string {
+  return `https://solscan.io/tx/${sig}${cluster.solscanParam}`;
+}
 
-  const res = await fetch(DEVNET_RPC, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body,
-  });
-
-  if (!res.ok) throw new Error(`RPC HTTP ${res.status}`);
-
-  const json = (await res.json()) as {
-    result?: string;
-    error?: { message: string };
-  };
-
-  if (json.error) return { signature: "", error: json.error.message };
-  return { signature: json.result ?? "" };
+function shortenSig(sig: string): string {
+  return sig.length > 20 ? `${sig.slice(0, 10)}…${sig.slice(-6)}` : sig;
 }
 
 /* ── Component ──────────────────────────────────────────────────────────── */
@@ -82,6 +196,18 @@ export function ReceivePage({ sharedPassword, onPasswordChange }: Props) {
   const [camErr,    setCamErr]    = useState<string | null>(null);
   const [broadcastResult, setBroadcastResult] = useState<BroadcastResult | null>(null);
   const [broadcasting, setBroadcasting] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  // Cluster selector
+  const [clusterId,   setClusterId]   = useState<ClusterId>("devnet");
+  const [customRpc,   setCustomRpc]   = useState("");
+
+  // Airdrop
+  const [airdropAmt,    setAirdropAmt]    = useState("1");
+  const [airdropSig,    setAirdropSig]    = useState<string | null>(null);
+  const [airdropErr,    setAirdropErr]    = useState<string | null>(null);
+  const [airdropping,   setAirdropping]   = useState(false);
+  const [balance,       setBalance]       = useState<number | null>(null);
 
   const videoRef  = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -93,11 +219,16 @@ export function ReceivePage({ sharedPassword, onPasswordChange }: Props) {
     free: () => void;
   } | null>(null);
 
+  const cluster = getCluster(clusterId, customRpc);
+
   /* ── Camera ─────────────────────────────────────────────────────────── */
   const startCamera = useCallback(async () => {
     setCamErr(null);
     setResponse(null);
     setBroadcastResult(null);
+    setAirdropSig(null);
+    setAirdropErr(null);
+    setBalance(null);
     setProgress(0);
     setStatus("Starting camera…");
 
@@ -197,16 +328,30 @@ export function ReceivePage({ sharedPassword, onPasswordChange }: Props) {
     return () => cancelAnimationFrame(rafRef.current);
   }, [scanning, stopCamera]);
 
+  /* ── Balance fetch (after response) ─────────────────────────────────── */
+  useEffect(() => {
+    if (!response || !response.pubkey || response.pubkey === "?" || !cluster.rpc) return;
+    let cancelled = false;
+    getBalance(response.pubkey, cluster.rpc).then((b) => {
+      if (!cancelled) setBalance(b);
+    });
+    return () => { cancelled = true; };
+  }, [response, cluster.rpc]);
+
   /* ── Broadcast ──────────────────────────────────────────────────────── */
   const handleBroadcast = useCallback(async () => {
-    if (!response?.tx) return;
+    if (!response?.tx || !cluster.rpc) return;
     setBroadcasting(true);
     setBroadcastResult(null);
-    setStatus("Broadcasting to Solana devnet…");
+    setStatus(`Broadcasting to ${cluster.label}…`);
     try {
-      const result = await broadcastToDevnet(response.tx);
+      const result = await broadcastToCluster(response.tx, cluster.rpc);
       setBroadcastResult(result);
-      setStatus(result.error ? `✗ Broadcast failed: ${result.error}` : `✓ Broadcast accepted — sig: ${result.signature.slice(0, 16)}…`);
+      if (result.error) {
+        setStatus(`✗ Broadcast failed: ${result.error}`);
+      } else {
+        setStatus(`✓ Transaction submitted to ${cluster.label}!`);
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       setBroadcastResult({ signature: "", error: msg });
@@ -214,7 +359,38 @@ export function ReceivePage({ sharedPassword, onPasswordChange }: Props) {
     } finally {
       setBroadcasting(false);
     }
-  }, [response]);
+  }, [response, cluster]);
+
+  /* ── Copy signature ──────────────────────────────────────────────────── */
+  const handleCopy = useCallback((text: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    });
+  }, []);
+
+  /* ── Airdrop ─────────────────────────────────────────────────────────── */
+  const handleAirdrop = useCallback(async () => {
+    if (!response?.pubkey || !cluster.rpc) return;
+    setAirdropping(true);
+    setAirdropSig(null);
+    setAirdropErr(null);
+    try {
+      const sol = Math.max(0.01, Math.min(2, parseFloat(airdropAmt) || 1));
+      const lamports = Math.round(sol * 1_000_000_000);
+      const sig = await requestAirdrop(response.pubkey, lamports, cluster.rpc);
+      setAirdropSig(sig);
+      // Refresh balance after a short delay
+      setTimeout(async () => {
+        const b = await getBalance(response.pubkey, cluster.rpc);
+        setBalance(b);
+      }, 3000);
+    } catch (e: unknown) {
+      setAirdropErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAirdropping(false);
+    }
+  }, [response, cluster.rpc, airdropAmt]);
 
   useEffect(() => () => {
     cancelAnimationFrame(rafRef.current);
@@ -243,7 +419,7 @@ export function ReceivePage({ sharedPassword, onPasswordChange }: Props) {
       </div>
 
       <div className="two-col">
-        {/* Left — camera */}
+        {/* Left — camera + cluster */}
         <div>
           <div className="card">
             <div className="card-title">Shared password</div>
@@ -255,6 +431,35 @@ export function ReceivePage({ sharedPassword, onPasswordChange }: Props) {
               onChange={(e) => onPasswordChange(e.target.value)}
               disabled={scanning}
             />
+          </div>
+
+          {/* Cluster selector */}
+          <div className="card">
+            <div className="card-title">Target cluster</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+              {CLUSTERS.map((c) => (
+                <button
+                  key={c.id}
+                  className={`btn btn-sm ${clusterId === c.id ? "btn-primary" : "btn-outline"}`}
+                  onClick={() => setClusterId(c.id)}
+                  style={{ fontSize: 13, padding: "4px 12px" }}
+                >
+                  {c.label}
+                </button>
+              ))}
+            </div>
+            {clusterId === "custom" && (
+              <input
+                type="text"
+                placeholder="https://my-rpc.example.com"
+                value={customRpc}
+                onChange={(e) => setCustomRpc(e.target.value)}
+                style={{ marginTop: 4 }}
+              />
+            )}
+            <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 6 }}>
+              {cluster.rpc || "Enter custom RPC URL above"}
+            </p>
           </div>
 
           <div className="card">
@@ -299,7 +504,13 @@ export function ReceivePage({ sharedPassword, onPasswordChange }: Props) {
               {response && (
                 <button
                   className="btn btn-outline"
-                  onClick={() => { setResponse(null); setBroadcastResult(null); }}
+                  onClick={() => {
+                    setResponse(null);
+                    setBroadcastResult(null);
+                    setAirdropSig(null);
+                    setAirdropErr(null);
+                    setBalance(null);
+                  }}
                 >
                   🔄 Scan again
                 </button>
@@ -312,10 +523,12 @@ export function ReceivePage({ sharedPassword, onPasswordChange }: Props) {
             <div className="card-title">Instructions</div>
             <ol style={{ paddingLeft: 20, fontSize: 13, color: "var(--muted)", lineHeight: 2 }}>
               <li>Switch to this tab on the <strong style={{ color: "var(--text)" }}>online machine</strong>.</li>
+              <li>Select the target <strong style={{ color: "var(--text)" }}>cluster</strong> (devnet for testing).</li>
               <li>Click <strong style={{ color: "var(--text)" }}>Start scanning</strong> and point the camera at the air-gapped machine's QR stream.</li>
               <li>Once scanning completes, review the signature details on the right.</li>
-              <li>Click <strong style={{ color: "var(--text)" }}>Broadcast to Devnet</strong> to submit the transaction.</li>
-              <li>Copy the transaction signature and verify on Solana Explorer.</li>
+              <li>Optionally click <strong style={{ color: "var(--text)" }}>Request Airdrop</strong> (devnet/testnet) to fund the signer address.</li>
+              <li>Click <strong style={{ color: "var(--text)" }}>Broadcast</strong> to submit the transaction.</li>
+              <li>Copy the signature and verify on Solana Explorer or Solscan.</li>
             </ol>
           </div>
         </div>
@@ -335,8 +548,14 @@ export function ReceivePage({ sharedPassword, onPasswordChange }: Props) {
                   <tbody>
                     <tr>
                       <th>Signer pubkey</th>
-                      <td className="mono">{response.pubkey}</td>
+                      <td className="mono" style={{ wordBreak: "break-all" }}>{response.pubkey}</td>
                     </tr>
+                    {balance !== null && (
+                      <tr>
+                        <th>Balance</th>
+                        <td className="mono">{balance.toFixed(6)} SOL</td>
+                      </tr>
+                    )}
                     <tr>
                       <th>Signature (first 32B)</th>
                       <td className="mono">{response.sig.slice(0, 64)}{response.sig.length > 64 ? "…" : ""}</td>
@@ -345,37 +564,128 @@ export function ReceivePage({ sharedPassword, onPasswordChange }: Props) {
                       <th>Tx (base64, truncated)</th>
                       <td className="mono">{response.tx.slice(0, 64)}{response.tx.length > 64 ? "…" : ""}</td>
                     </tr>
+                    <tr>
+                      <th>Cluster</th>
+                      <td className="mono">{cluster.label}</td>
+                    </tr>
                   </tbody>
                 </table>
               </div>
 
-              <div className="card">
-                <div className="card-title">Broadcast</div>
-                <div className="alert alert-info" style={{ marginBottom: 16 }}>
-                  This demo uses Solana <strong>devnet</strong>. The demo transaction stub will likely fail
-                  signature verification — this is expected. In production, a real unsigned transaction
-                  would be constructed with AirSign CLI and signed with a real keypair.
+              {/* Airdrop card (devnet / testnet only) */}
+              {cluster.airdropEnabled && (
+                <div className="card">
+                  <div className="card-title">💧 Request Airdrop ({cluster.label})</div>
+                  <p style={{ fontSize: 13, color: "var(--muted)", marginBottom: 10 }}>
+                    Fund the signer address with test SOL from the public faucet.
+                    Up to 2 SOL per request. Mainnet is not eligible.
+                  </p>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
+                    <input
+                      type="number"
+                      min="0.01"
+                      max="2"
+                      step="0.1"
+                      value={airdropAmt}
+                      onChange={(e) => setAirdropAmt(e.target.value)}
+                      style={{ width: 80 }}
+                    />
+                    <span style={{ fontSize: 13, color: "var(--muted)" }}>SOL</span>
+                  </div>
+                  {airdropErr && (
+                    <div className="alert alert-err" style={{ marginBottom: 8 }}>
+                      ✗ Airdrop failed: {airdropErr}
+                    </div>
+                  )}
+                  {airdropSig && (
+                    <div className="alert alert-ok" style={{ marginBottom: 8 }}>
+                      ✓ Airdrop submitted!{" "}
+                      <a
+                        href={explorerUrl(airdropSig, cluster)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ color: "var(--accent2)" }}
+                      >
+                        {shortenSig(airdropSig)} ↗
+                      </a>
+                    </div>
+                  )}
+                  <button
+                    className="btn btn-outline"
+                    onClick={handleAirdrop}
+                    disabled={airdropping || !response.pubkey || response.pubkey === "?"}
+                  >
+                    {airdropping ? "Requesting…" : `💧 Airdrop ${airdropAmt} SOL`}
+                  </button>
                 </div>
+              )}
+
+              {/* Broadcast card */}
+              <div className="card">
+                <div className="card-title">🚀 Broadcast to {cluster.label}</div>
+                {!cluster.rpc && (
+                  <div className="alert alert-err" style={{ marginBottom: 12 }}>
+                    No RPC URL set. Enter a custom URL in the cluster selector.
+                  </div>
+                )}
+                {cluster.id === "devnet" && (
+                  <div className="alert alert-info" style={{ marginBottom: 12, fontSize: 13 }}>
+                    Using <strong>devnet</strong>. The demo transaction stub may fail signature
+                    verification — this is expected. In production, sign a real unsigned tx with{" "}
+                    <code>airsign prepare</code> + <code>airsign sign</code>.
+                  </div>
+                )}
 
                 {broadcastResult && (
-                  <div className={`alert ${broadcastResult.error ? "alert-err" : "alert-ok"}`}>
+                  <div className={`alert ${broadcastResult.error ? "alert-err" : "alert-ok"}`} style={{ marginBottom: 12 }}>
                     {broadcastResult.error ? (
                       <>✗ RPC error: {broadcastResult.error}</>
                     ) : (
-                      <>
-                        ✓ Transaction submitted!
-                        <br />
-                        <span className="mono">{broadcastResult.signature}</span>
-                        <br />
-                        <a
-                          href={`https://explorer.solana.com/tx/${broadcastResult.signature}?cluster=devnet`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{ color: "var(--accent2)" }}
+                      <div>
+                        <div style={{ marginBottom: 6 }}>✓ Transaction submitted to <strong>{cluster.label}</strong>!</div>
+                        <div
+                          className="mono"
+                          style={{
+                            fontSize: 12,
+                            wordBreak: "break-all",
+                            background: "rgba(0,0,0,0.15)",
+                            borderRadius: 4,
+                            padding: "4px 6px",
+                            marginBottom: 8,
+                          }}
                         >
-                          View on Solana Explorer ↗
-                        </a>
-                      </>
+                          {broadcastResult.signature}
+                        </div>
+                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                          <button
+                            className="btn btn-sm btn-outline"
+                            onClick={() => handleCopy(broadcastResult.signature)}
+                            style={{ fontSize: 12 }}
+                          >
+                            {copied ? "✓ Copied!" : "📋 Copy sig"}
+                          </button>
+                          <a
+                            href={explorerUrl(broadcastResult.signature, cluster)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="btn btn-sm btn-outline"
+                            style={{ fontSize: 12, textDecoration: "none" }}
+                          >
+                            🔍 Explorer ↗
+                          </a>
+                          {cluster.solscanParam !== undefined && (
+                            <a
+                              href={solscanUrl(broadcastResult.signature, cluster)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="btn btn-sm btn-outline"
+                              style={{ fontSize: 12, textDecoration: "none" }}
+                            >
+                              📊 Solscan ↗
+                            </a>
+                          )}
+                        </div>
+                      </div>
                     )}
                   </div>
                 )}
@@ -384,10 +694,44 @@ export function ReceivePage({ sharedPassword, onPasswordChange }: Props) {
                   <button
                     className="btn btn-success"
                     onClick={handleBroadcast}
-                    disabled={broadcasting || !response.tx || !!broadcastResult}
+                    disabled={broadcasting || !response.tx || !!broadcastResult || !cluster.rpc}
                   >
-                    {broadcasting ? "Broadcasting…" : "🚀 Broadcast to Devnet"}
+                    {broadcasting ? "Broadcasting…" : `🚀 Broadcast to ${cluster.label}`}
                   </button>
+                  {broadcastResult && (
+                    <button
+                      className="btn btn-outline"
+                      onClick={() => setBroadcastResult(null)}
+                    >
+                      ↺ Retry
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* CLI equivalent */}
+              <div className="card">
+                <div className="card-title">CLI equivalent</div>
+                <p style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>
+                  Reproduce this broadcast with the AirSign CLI:
+                </p>
+                <div
+                  className="mono"
+                  style={{
+                    background: "rgba(0,0,0,0.25)",
+                    borderRadius: 6,
+                    padding: "10px 12px",
+                    fontSize: 12,
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-all",
+                    color: "var(--accent2)",
+                    marginBottom: 8,
+                  }}
+                >
+                  {`airsign broadcast sign_response.json --cluster ${clusterId}`}
+                  {cluster.airdropEnabled
+                    ? `\n\n# Or airdrop first:\nairsign airdrop --to ${response.pubkey.slice(0, 16)}… --amount ${airdropAmt} --cluster ${clusterId}`
+                    : ""}
                 </div>
               </div>
 
@@ -409,6 +753,9 @@ export function ReceivePage({ sharedPassword, onPasswordChange }: Props) {
                 <p className="status" style={{ fontSize: 48, marginBottom: 12 }}>📨</p>
                 <p className="status">
                   Scan the QR stream from the air-gapped machine to receive the signed transaction.
+                </p>
+                <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 12 }}>
+                  Selected cluster: <strong style={{ color: "var(--text)" }}>{cluster.label}</strong>
                 </p>
               </div>
             </div>

@@ -19,6 +19,7 @@ AirSign lets you sign Solana transactions on a device that has *never* touched t
 - [FROST Threshold Signatures](#frost-threshold-signatures)
 - [Trustless DKG](#trustless-dkg)
 - [Squads v4 Multisig](#squads-v4-multisig)
+- [Broadcast & Faucet](#broadcast--faucet)
 - [Ledger Hardware Wallet](#ledger-hardware-wallet)
 - [Cryptography](#cryptography)
 - [CI & Testing](#ci--testing)
@@ -423,6 +424,80 @@ const out = JSON.parse(p1.finish(allR1, allR2));
 ```
 
 The **Trustless DKG** tab in the signer-web app runs a full multi-participant DKG session inside the browser with no server required.
+
+---
+
+## Broadcast & Faucet
+
+Once the signed response is back on the online machine, AirSign can submit it directly to any Solana cluster — no third-party wallet required.
+
+### `airsign broadcast` — submit a signed response
+
+```bash
+# Devnet (default)
+airsign broadcast sign_response.json
+
+# Mainnet-beta
+airsign broadcast sign_response.json --cluster mainnet
+
+# Custom RPC
+airsign broadcast sign_response.json --cluster https://my-rpc.example.com
+```
+
+On success the transaction signature is printed to **stdout** (scriptable) and an Explorer deep-link is printed to **stderr**:
+
+```
+5Xg1…mBpQ
+[airsign] ✓ confirmed on devnet
+https://explorer.solana.com/tx/5Xg1…mBpQ?cluster=devnet
+```
+
+### `airsign airdrop` — fund an address from the public faucet
+
+Devnet and testnet only. Mainnet requests are rejected immediately.
+
+```bash
+airsign airdrop --to 4wTQ…               # 1 SOL on devnet (default)
+airsign airdrop --to 4wTQ… --amount 2    # 2 SOL on devnet
+airsign airdrop --to 4wTQ… --cluster testnet  # testnet faucet
+```
+
+### `airsign run` — end-to-end single-command pipeline
+
+Loads a Solana CLI keypair file, builds a SOL transfer, signs locally, fetches a fresh blockhash, and broadcasts — useful for demos and testing without the QR air-gap.
+
+```bash
+airsign run \
+  --keypair ~/.config/solana/id.json \
+  --to 9xRz… \
+  --amount 0.01 \
+  --cluster devnet
+```
+
+Output:
+
+```
+[airsign] run: 4wTQ… → 9xRz… | 0.01 SOL (10000000 lamports) | cluster: devnet
+[airsign] ✓ transaction built and signed locally
+[airsign] broadcasting to https://api.devnet.solana.com…
+5Xg1…mBpQ
+[airsign] ✓ confirmed!
+  Explorer : https://explorer.solana.com/tx/5Xg1…mBpQ?cluster=devnet
+  Solscan  : https://solscan.io/tx/5Xg1…mBpQ?cluster=devnet
+```
+
+### Web UI — ReceivePage (Broadcast & Faucet)
+
+The signer-web `Receive & Broadcast` tab now includes:
+
+| Feature | Description |
+|---|---|
+| Cluster selector | Devnet / Testnet / Mainnet-beta / Custom RPC |
+| Balance display | Live SOL balance for the signer pubkey |
+| 💧 Airdrop panel | Request up to 2 SOL from the public faucet (devnet/testnet only) |
+| 🚀 Broadcast | One-click `sendTransaction`, shows signature + Explorer/Solscan links |
+| 📋 Copy sig | Copy transaction signature to clipboard |
+| CLI snippet | Equivalent `airsign broadcast` / `airsign airdrop` command |
 
 ---
 
