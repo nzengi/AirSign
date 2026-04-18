@@ -14,3 +14,4 @@ node_modules/
 packages/react/dist/
 
 # Demo app
+apps/signer-mobile/modules/airsign-core/.gradle/
