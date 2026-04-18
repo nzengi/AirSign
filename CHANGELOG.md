@@ -1,5 +1,51 @@
 # Changelog
 
+## [6.0.0] — 2026-04-18
+
+### Added
+
+- **`apps/signer-mobile`** — new Expo React Native air-gapped signer app:
+  - `AirplaneModeGuard` — blocks the entire UI whenever any network interface
+    is reachable; re-checks every 5 s and on every foreground resume
+  - `QrScanner` — expo-camera QR scanner with per-frame deduplication, torch
+    toggle, and viewfinder overlay
+  - `QrAnimator` — animates a fountain-code frame array as cycling QR codes
+    with configurable fps and fade transitions
+  - `TransactionReview` — full transaction review UI with per-instruction risk
+    flags, account labels (signer / writable badges), raw hex data, and
+    colour-coded risk banner (safe / warn / critical)
+  - **Screens**: Home (`/`), Scan (`/scan`), Display (`/display`),
+    Key Management (`/keystore`), Settings (`/settings`)
+  - `src/native/AirSignCore.ts` — typed `IAirSignCore` interface covering
+    `generateKeypair`, `deleteKeypair`, `listKeypairIds`, `signTransaction`,
+    `inspectTransaction`, `fountainEncode`, `fountainDecode`,
+    `resetFountainSession`; ships with a fail-fast stub until the native
+    module is linked
+  - `app/_layout.tsx` — Expo Router root layout wrapping the entire app in
+    `AirplaneModeGuard` and dark `<Stack>` navigator
+
+- **`docs/AUDIT_PACKAGE/`** — six-document audit package:
+  - `SCOPE.md` — system description, in-scope crates/packages, audit goals
+  - `THREAT_MODEL.md` — STRIDE table, trust boundaries, attack trees, mitigations
+  - `CRYPTO_SPEC.md` — Ed25519, ChaCha20-Poly1305, Argon2id, FROST RFC 9591, fountain LT codes
+  - `TEST_COVERAGE.md` — per-crate coverage table (158 tests total), gap analysis
+  - `KNOWN_ISSUES.md` — 10 tracked issues (KI-001 … KI-010) with severity, status, mitigations
+  - `QUESTIONNAIRE.md` — 25-question pre-audit questionnaire with answers
+
+- **CI** (`ci.yml`) — added `cargo audit` (advisory DB check) and
+  `cargo deny check` (license + duplicate + ban) gates to the existing
+  lint / test / clippy / build matrix; added `deny.toml` policy file
+
+### Security
+
+- Airplane-mode enforcement is now enforced at the React Native layer
+  (KI-010: advisory note added that the guard can be spoofed on
+  rooted/jailbroken devices)
+- All keypairs stored exclusively in the platform secure keychain
+  (iOS Secure Enclave / Android Keystore) via `expo-secure-store`
+
+---
+
 ## [5.0.0] — 2026-04-18
 
 ### Added

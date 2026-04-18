@@ -2,7 +2,7 @@
 
 **Air-gapped, fountain-coded, encrypted transaction signing for Solana.**
 
-> **v5.0.0** — WASM bindings (Squads, Broadcaster, KeyStore), 135 tests across all crates, `docs/SECURITY_MODEL.md` (STRIDE + RFC-style crypto spec)
+> **v6.0.0** — Mobile signer app (Expo/React Native), audit package (`docs/AUDIT_PACKAGE/`), CI supply-chain gates (`cargo audit` + `cargo deny`), 158 tests across all crates
 
 AirSign lets you sign Solana transactions on a device that has *never* touched the internet — using nothing but a webcam and QR codes. It is also the first open-source implementation of M-of-N multi-signature orchestration over an air-gap channel.
 
@@ -23,6 +23,8 @@ AirSign lets you sign Solana transactions on a device that has *never* touched t
 - [Squads v4 Multisig](#squads-v4-multisig)
 - [Broadcast & Faucet](#broadcast--faucet)
 - [Ledger Hardware Wallet](#ledger-hardware-wallet)
+- [Mobile Signer App](#mobile-signer-app)
+- [Audit Package](#audit-package)
 - [Cryptography](#cryptography)
 - [CI & Testing](#ci--testing)
 - [Roadmap](#roadmap)
@@ -654,13 +656,68 @@ Open **tab 7 "🏛️ Squads v4"** in the signer web app for a full guided form 
 
 ## Roadmap
 
-- [x] **Squads v4 integration** — `afterimage-squads` crate + `airsign squads` CLI — see [Squads v4 Multisig](#squads-v4-multisig).
+- [x] **Squads v4 integration** — `afterimage-squads` crate + `airsign squads` CLI.
 - [x] **FROST threshold signatures** — FROST RFC 9591, 2-round parallel threshold signing.
 - [x] **Trustless DKG** — FROST RFC 9591 distributed key generation without a trusted dealer.
+- [x] **Mobile signer app** — Expo/React Native `apps/signer-mobile` with airplane-mode enforcement.
+- [x] **Audit package** — six-document `docs/AUDIT_PACKAGE/` ready for external review.
+- [x] **Supply-chain gates** — `cargo audit` + `cargo deny` in CI.
 - [ ] **NFC channel** — alternative to QR codes for devices with NFC capability.
-- [ ] **Mobile companion app** — React Native app that acts as the air-gapped signer (airplane mode enforced).
 - [ ] **Formal security audit** — independent review of the cryptographic protocol and Rust implementation.
-- [ ] **Devnet faucet integration** — one-click airdrop + sign + broadcast demo for new users.
+
+---
+
+## Mobile Signer App
+
+`apps/signer-mobile` is a full Expo (React Native) application that turns any iOS or Android phone into an air-gapped Solana signer.
+
+### Key properties
+
+- **Airplane-mode enforced** — `AirplaneModeGuard` polls `expo-network` every 5 s and blocks the entire UI whenever any network interface is reachable.
+- **No network permissions** — the app requests camera permission only; no `ACCESS_NETWORK_STATE`, no `INTERNET` manifest entries required.
+- **Keys in platform secure keychain** — `expo-secure-store` delegates to iOS Secure Enclave / Android Keystore.
+
+### Screens
+
+| Route | Description |
+|---|---|
+| `/` | Home — offline status badge + navigation |
+| `/scan` | Scan animated QR codes from the online machine, show transaction review, sign |
+| `/display` | Show signed transaction as animated fountain-coded QR frames |
+| `/keystore` | Generate, list, and delete Ed25519 keypairs |
+| `/settings` | QR fps, QR size, FROST threshold, biometrics toggle |
+
+### Getting started
+
+```bash
+cd apps/signer-mobile
+npm install
+npx expo start
+# Scan the QR code with Expo Go on a device in airplane mode
+```
+
+> **Important:** Use a physical device in airplane mode, not a simulator. The `AirplaneModeGuard` will block the UI on any device that has reachable network interfaces.
+
+### Native module bridge
+
+`src/native/AirSignCore.ts` defines the `IAirSignCore` TypeScript interface that the production native module (compiled from `crates/afterimage-wasm`) must implement. Until the JSI bridge is wired up, a fail-fast stub is loaded so the app launches in Expo Go for UI development.
+
+---
+
+## Audit Package
+
+`docs/AUDIT_PACKAGE/` contains six documents prepared for external security reviewers:
+
+| File | Contents |
+|---|---|
+| `SCOPE.md` | System description, in-scope crates/packages, out-of-scope items, audit goals |
+| `THREAT_MODEL.md` | STRIDE table, trust boundaries, data-flow diagrams, attack trees, mitigations |
+| `CRYPTO_SPEC.md` | Full specification of Ed25519, ChaCha20-Poly1305, Argon2id, FROST RFC 9591, fountain LT codes |
+| `TEST_COVERAGE.md` | Per-crate test count table (158 total), coverage gaps, integration test matrix |
+| `KNOWN_ISSUES.md` | 10 tracked issues KI-001 … KI-010: severity, status, workarounds, mitigations |
+| `QUESTIONNAIRE.md` | 25-question pre-audit questionnaire with answers covering design decisions, dependencies, and deployment |
+
+CI also runs `cargo audit` (RustSec advisory database) and `cargo deny check` (license policy + duplicate dependency + banned crate gates) on every push.
 
 ---
 

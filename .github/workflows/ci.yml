@@ -54,6 +54,18 @@ jobs:
           --exclude afterimage-wasm
           --all-features
 
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --quiet
+
+      - name: cargo audit
+        run: cargo audit
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked --quiet
+
+      - name: cargo deny check
+        run: cargo deny check
+
   # ── WASM build ─────────────────────────────────────────────────────────
   wasm:
     name: WASM (wasm-pack build)

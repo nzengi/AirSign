@@ -1,0 +1,57 @@
+{
+  "expo": {
+    "name": "AirSign Signer",
+    "slug": "airsign-signer",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0a0a0a"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "io.airsign.signer",
+      "infoPlist": {
+        "NSCameraUsageDescription": "AirSign needs camera access to scan QR codes from the online machine.",
+        "NSFaceIDUsageDescription": "AirSign uses Face ID to protect access to your signing keys."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0a0a0a"
+      },
+      "package": "io.airsign.signer",
+      "permissions": [
+        "CAMERA",
+        "USE_BIOMETRIC",
+        "USE_FINGERPRINT"
+      ]
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "AirSign needs camera access to scan QR codes."
+        }
+      ],
+      [
+        "expo-secure-store",
+        {
+          "faceIDPermission": "AirSign uses Face ID to protect your signing keys."
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "scheme": "airsign"
+  }
+}
