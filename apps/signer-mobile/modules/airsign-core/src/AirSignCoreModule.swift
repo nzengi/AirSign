@@ -1,16 +1,16 @@
 /**
- * AirSignCoreModule.swift — iOS v2.1 WKWebView bridge for AirSignCore.
+ * AirSignCoreModule.swift — iOS v2.2 WKWebView bridge for AirSignCore.
  *
- * v2.1 changes vs v2:
- *   · Registers "airSignSaveSecret" WKScriptMessageHandler so the bridge HTML
- *     can push newly-generated secret keys directly into the Keychain without
- *     the secret ever appearing in a Promise result.
- *   · On bridgeDidBecomeReady(), loads all stored {id, secretHex} pairs from
- *     the Keychain and calls AirSign.restoreKeypairs() so the WASM memory
- *     cache is fully warm before any sign call arrives.
- *   · Removes the per-call ensureLoaded() round-trip from signTransaction /
- *     signMessage — the cache is guaranteed warm after startup restore; the
- *     fallback ensureLoaded() is kept only as a safety net for edge cases.
+ * v2.2 changes vs v2.1:
+ *   · importKeypair(privateKeyBase58:) — delegates to the WASM bridge which
+ *     decodes base58, derives the Ed25519 pubkey, and persists the secret via
+ *     the airSignSaveSecret channel.  Returns {id, pubkeyHex, pubkeyBase58}.
+ *   · exportPrivateKey(id:) — loads the seed hex directly from Keychain and
+ *     converts it to base58 in Swift.  The secret never passes through WASM or
+ *     the JS bridge on the way out.
+ *   · renameKeypair(id:newLabel:) — no-op at the crypto layer; label management
+ *     is a UI/AsyncStorage concern.  Resolves immediately.
+ *   · base58Encode() and hexToBytes() Swift helpers added.
  *
  * Architecture:
  *   ┌────────────────────────┐      evaluateJavaScript()
@@ -60,6 +60,29 @@ public class AirSignCoreModule: Module, WKNavigationDelegate {
       // The bridge HTML calls saveSecretToNative() automatically before
       // resolving, so we just forward the result {id, pubkeyHex, pubkeyBase58}.
       self?.call("generateKeypair", args: [], promise: promise)
+    }
+
+    AsyncFunction("importKeypair") { [weak self] (privateKeyBase58: String, promise: Promise) in
+      // Delegate to the WASM bridge which: decodes base58, validates length,
+      // derives pubkey, calls saveSecretToNative(), caches, and resolves.
+      self?.call("importKeypair", args: [privateKeyBase58], promise: promise)
+    }
+
+    AsyncFunction("exportPrivateKey") { [weak self] (id: String, promise: Promise) in
+      // Load the seed hex directly from Keychain and convert to base58 here in
+      // Swift — the secret never touches WASM or the JS bridge on the way out.
+      guard let self = self else { promise.reject("INTERNAL", "module deallocated", nil); return }
+      guard let secretHex = self.loadSecretFromKeychain(id: id) else {
+        promise.reject("KEY_NOT_FOUND", "No keypair with id \(id)", nil); return
+      }
+      let bytes = self.hexToBytes(secretHex)
+      let base58 = self.base58Encode(bytes)
+      promise.resolve(base58)
+    }
+
+    AsyncFunction("renameKeypair") { [weak self] (id: String, newLabel: String, promise: Promise) in
+      // No-op at the crypto layer; labels live in AsyncStorage on the RN side.
+      promise.resolve(nil)
     }
 
     AsyncFunction("deleteKeypair") { [weak self] (id: String, promise: Promise) in
@@ -321,6 +344,50 @@ public class AirSignCoreModule: Module, WKNavigationDelegate {
           let items = result as? [[CFString: Any]]
     else { return [] }
     return items.compactMap { $0[kSecAttrAccount] as? String }
+  }
+
+  // MARK: - Base58 encoding (for exportPrivateKey — no external deps)
+
+  private static let b58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+  /// Encode a byte array as a Base58 string (Bitcoin/Solana alphabet).
+  private func base58Encode(_ bytes: [UInt8]) -> String {
+    var digits = [Int]()
+    for byte in bytes {
+      var carry = Int(byte)
+      for j in 0..<digits.count {
+        carry += digits[j] << 8
+        digits[j] = carry % 58
+        carry /= 58
+      }
+      while carry > 0 {
+        digits.append(carry % 58)
+        carry /= 58
+      }
+    }
+    let leadingZeros = bytes.prefix(while: { $0 == 0 }).count
+    let prefix = String(repeating: "1", count: leadingZeros)
+    let alphabet = Self.b58Alphabet
+    let encoded = digits.reversed().map { d -> String in
+      let idx = alphabet.index(alphabet.startIndex, offsetBy: d)
+      return String(alphabet[idx])
+    }.joined()
+    return prefix + encoded
+  }
+
+  /// Decode a lowercase hex string into a byte array.
+  private func hexToBytes(_ hex: String) -> [UInt8] {
+    var bytes = [UInt8]()
+    bytes.reserveCapacity(hex.count / 2)
+    var idx = hex.startIndex
+    while idx < hex.endIndex {
+      let next = hex.index(idx, offsetBy: 2, limitedBy: hex.endIndex) ?? hex.endIndex
+      if let byte = UInt8(hex[idx..<next], radix: 16) {
+        bytes.append(byte)
+      }
+      idx = next
+    }
+    return bytes
   }
 }
 

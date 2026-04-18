@@ -1,15 +1,16 @@
 /**
- * AirSignCoreModule.kt — Android v2.1 WebView bridge for AirSignCore.
+ * AirSignCoreModule.kt — Android v2.2 WebView bridge for AirSignCore.
  *
- * v2.1 changes vs v2:
- *   · JsBridge.saveSecret(id, secretHex) @JavascriptInterface — called by the
- *     bridge HTML immediately after generating a keypair, before the Promise
- *     resolves. The secret is persisted to Android Keystore + SharedPreferences
- *     without ever appearing in a Promise result on the RN side.
- *   · onReady(): after WASM init, all stored {id, secretHex} pairs are read
- *     from the Keystore and passed to AirSign.restoreKeypairs() so the WASM
- *     memory cache is warm before any sign call arrives (no per-call loadKeypair
- *     round-trip required after app restart).
+ * v2.2 changes vs v2.1:
+ *   · importKeypair(privateKeyBase58) @AsyncFunction — delegates to the WASM
+ *     bridge which decodes base58, validates length, derives pubkey, calls
+ *     AirSignBridge.saveSecret(), caches, and returns {id,pubkeyHex,pubkeyBase58}.
+ *   · exportPrivateKey(id) @AsyncFunction — decrypts the seed hex from Android
+ *     Keystore entirely in Kotlin and converts to base58 here.  The secret never
+ *     passes through the JS bridge on the way out.
+ *   · renameKeypair(id, newLabel) @AsyncFunction — no-op at the crypto layer;
+ *     label management is a UI/AsyncStorage concern.  Resolves immediately.
+ *   · base58Encode() and hexToBytes() Kotlin helpers added.
  *
  * Architecture:
  *   ┌─────────────────────┐   evaluateJavascript()
@@ -79,6 +80,27 @@ class AirSignCoreModule : Module() {
       // The bridge HTML calls AirSignBridge.saveSecret() automatically before
       // posting the result, so we just forward {id, pubkeyHex, pubkeyBase58}.
       call("generateKeypair", emptyList(), promise)
+    }
+
+    AsyncFunction("importKeypair") { privateKeyBase58: String, promise: Promise ->
+      // Delegate to the WASM bridge: decodes base58, validates length, derives
+      // pubkey, calls saveSecret(), caches, and returns {id,pubkeyHex,pubkeyBase58}.
+      call("importKeypair", listOf(privateKeyBase58), promise)
+    }
+
+    AsyncFunction("exportPrivateKey") { id: String, promise: Promise ->
+      // Decrypt the seed hex from the Android Keystore in Kotlin and convert
+      // to base58 here — the secret never touches the JS bridge on the way out.
+      val secretHex = loadSecretFromKeystore(id)
+        ?: return@AsyncFunction promise.reject("KEY_NOT_FOUND", "No keypair with id $id", null)
+      val bytes  = hexToBytes(secretHex)
+      val base58 = base58Encode(bytes)
+      promise.resolve(base58)
+    }
+
+    AsyncFunction("renameKeypair") { id: String, newLabel: String, promise: Promise ->
+      // No-op at the crypto layer; labels live in AsyncStorage on the RN side.
+      promise.resolve(null)
     }
 
     AsyncFunction("deleteKeypair") { id: String, promise: Promise ->
@@ -241,11 +263,12 @@ class AirSignCoreModule : Module() {
     }
 
     /**
-     * Called by airsign_bridge.html immediately after generating a keypair,
-     * BEFORE the Promise result is posted. Saves the secret to the Keystore.
+     * Called by airsign_bridge.html immediately after generating or importing a
+     * keypair, BEFORE the Promise result is posted.  Saves the secret to the
+     * Android Keystore.
      *
      * @param id        keypair UUID
-     * @param secretHex Ed25519 secret key as lowercase hex string
+     * @param secretHex Ed25519 secret key (seed) as lowercase hex string
      */
     @JavascriptInterface
     fun saveSecret(id: String, secretHex: String) {
@@ -289,6 +312,9 @@ class AirSignCoreModule : Module() {
     const val PREF_NAME         = "airsign_keypairs"
     const val GCM_TAG_LENGTH    = 128
     const val GCM_IV_LENGTH     = 12
+
+    // Base58 alphabet (Bitcoin/Solana)
+    const val B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
   }
 
   private fun getOrCreateAesKey(id: String): SecretKey {
@@ -346,4 +372,44 @@ class AirSignCoreModule : Module() {
       ?.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
       ?.all?.keys?.toList()
       ?: emptyList()
+
+  // ── Base58 encoding (for exportPrivateKey — no external deps) ─────────────────
+
+  /**
+   * Encode a byte array as a Base58 string (Bitcoin/Solana alphabet).
+   * Used by exportPrivateKey to avoid routing the secret through the JS bridge.
+   */
+  private fun base58Encode(bytes: ByteArray): String {
+    val digits = mutableListOf<Int>()
+    for (byte in bytes) {
+      var carry = byte.toInt() and 0xFF
+      for (j in digits.indices) {
+        carry += digits[j] shl 8
+        digits[j] = carry % 58
+        carry /= 58
+      }
+      while (carry > 0) {
+        digits.add(carry % 58)
+        carry /= 58
+      }
+    }
+    val leadingZeros = bytes.takeWhile { it == 0.toByte() }.count()
+    val prefix  = "1".repeat(leadingZeros)
+    val encoded = digits.reversed().joinToString("") { B58_ALPHABET[it].toString() }
+    return prefix + encoded
+  }
+
+  /**
+   * Decode a lowercase hex string into a ByteArray.
+   * Used to convert the stored secretHex before base58-encoding for export.
+   */
+  private fun hexToBytes(hex: String): ByteArray {
+    val len  = hex.length
+    val data = ByteArray(len / 2)
+    for (i in 0 until len / 2) {
+      data[i] = ((Character.digit(hex[i * 2], 16) shl 4) +
+                  Character.digit(hex[i * 2 + 1], 16)).toByte()
+    }
+    return data
+  }
 }
