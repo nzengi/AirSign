@@ -1,0 +1,20 @@
+{
+  "name": "airsign-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "AirSign — air-gapped Solana signing monorepo",
+  "workspaces": [
+    "packages/*",
+    "apps/signer-web"
+  ],
+  "scripts": {
+    "build:react": "npm run build --workspace=packages/react",
+    "build:wallet-adapter": "npm run build --workspace=packages/wallet-adapter",
+    "build:packages": "npm run build:react && npm run build:wallet-adapter",
+    "build:web": "npm run build --workspace=apps/signer-web",
+    "test:react": "npm run test --workspace=packages/react"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}
