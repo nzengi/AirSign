@@ -1,18 +1,16 @@
 <!DOCTYPE html>
 <!--
-  airsign_bridge.html — Headless WASM bridge for AirSign mobile (v2)
+  airsign_bridge.html — Headless WASM bridge for AirSign mobile (v2.1)
 
-  Loaded by AirSignCoreModule.swift (WKWebView) and AirSignCoreModule.kt
-  (Android WebView). The native layer injects calls via evaluateJavaScript /
-  evaluateJavascript and receives results via window.webkit.messageHandlers
-  (iOS) or AirSignBridge.postResult (Android).
-
-  Security notes:
-  · The WebView has JavaScript enabled but network access is blocked.
-  · All file:// access is restricted to this bundle directory.
-  · No user-facing UI; the page is invisible (body { display:none }).
-  · Private keys never leave the WASM linear memory in plaintext — they
-    are stored encrypted via the native secure-store layer.
+  v2.1 changes vs v2:
+  · generateKeypair now pushes the secret key to the native secure store
+    automatically via saveSecretToNative() BEFORE resolving the Promise.
+    The secret never appears in the Promise result — only {id, pubkeyHex,
+    pubkeyBase58} is returned to the RN layer.
+  · restoreKeypairs(callId, keysJson) — called by native on bridge-ready so
+    all previously generated keypairs are warmed into the WASM memory cache.
+    This means signTransaction / signMessage never need an extra loadKeypair
+    round-trip after the first app restart.
 -->
 <html>
 <head>
@@ -29,20 +27,11 @@ import init, {
   WasmRecvSession,
 } from "./wasm/afterimage_wasm.js";
 
-// ─── Platform bridge helpers ─────────────────────────────────────────────────
+// ─── Platform: send result / error back to native ────────────────────────────
 
-/**
- * Send a result back to the native layer.
- *
- * iOS  → window.webkit.messageHandlers.airSignResult.postMessage(json)
- * Android → window.AirSignBridge.postResult(callId, json)
- *
- * The native layer passes a unique `callId` with every invocation so that
- * concurrent async calls can be dispatched to the correct Promise resolver.
- */
 function sendResult(callId, result) {
   const payload = JSON.stringify({ callId, ok: true, result });
-  if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.airSignResult) {
+  if (window.webkit?.messageHandlers?.airSignResult) {
     window.webkit.messageHandlers.airSignResult.postMessage(payload);
   } else if (window.AirSignBridge) {
     window.AirSignBridge.postResult(callId, payload);
@@ -51,56 +40,95 @@ function sendResult(callId, result) {
 
 function sendError(callId, message) {
   const payload = JSON.stringify({ callId, ok: false, error: String(message) });
-  if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.airSignResult) {
+  if (window.webkit?.messageHandlers?.airSignResult) {
     window.webkit.messageHandlers.airSignResult.postMessage(payload);
   } else if (window.AirSignBridge) {
     window.AirSignBridge.postResult(callId, payload);
   }
 }
 
+// ─── Platform: persist secret key to native secure store ─────────────────────
+//
+// Called INSIDE generateKeypair before sendResult() so the secret is always
+// stored before the Promise resolves.  The secret never reaches the RN layer.
+//
+// iOS  → WKScriptMessageHandler "airSignSaveSecret"  body: JSON {id, secretHex}
+// Android → AirSignBridge.saveSecret(id, secretHex)  @JavascriptInterface
+//
+function saveSecretToNative(id, secretHex) {
+  const body = JSON.stringify({ id, secretHex });
+  if (window.webkit?.messageHandlers?.airSignSaveSecret) {
+    window.webkit.messageHandlers.airSignSaveSecret.postMessage(body);
+  } else if (window.AirSignBridge) {
+    window.AirSignBridge.saveSecret(id, secretHex);
+  }
+}
+
 // ─── Fountain decoder session registry ───────────────────────────────────────
-// Maps sessionId → WasmRecvSession so the native layer can call decodeAdd
-// multiple times on the same decoder.
 const recvSessions = new Map();
 
-// ─── In-memory keypair store (WASM side) ─────────────────────────────────────
-// Maps keypair id → { secretKeyHex: string } so signing can be done fully
-// inside WASM without the secret key touching native memory.
-// The id/pubkey mapping is persisted on the native side via SecureStore.
+// ─── In-memory keypair store ──────────────────────────────────────────────────
+// Warmed on startup by restoreKeypairs() and updated by generateKeypair().
+// Maps id → secretKeyHex string.
 const keypairs = new Map();
 
-// ─── AirSign API exposed to the native bridge ────────────────────────────────
+// ─── AirSign API ──────────────────────────────────────────────────────────────
 window.AirSign = {
 
   // ── Key management ──────────────────────────────────────────────────────────
 
   /**
-   * Generate a new Ed25519 keypair. Returns { id, pubkeyHex, pubkeyBase58 }.
-   * The secret key is kept inside WASM memory only; the native layer stores
-   * { id → encryptedSecretKey } in SecureStore.
+   * Generate a new Ed25519 keypair.
+   *
+   * Flow:
+   *   1. WASM generates keypair entirely inside linear memory.
+   *   2. secret hex pushed to native Keychain/Keystore via saveSecretToNative.
+   *   3. Keypair cached in this page's memory Map.
+   *   4. { id, pubkeyHex, pubkeyBase58 } sent back — secret NOT included.
    */
   async generateKeypair(callId) {
     try {
-      const kp = new WasmKeypair();
-      const id  = kp.id();
-      keypairs.set(id, { secretKeyHex: kp.secret_key_hex() });
-      sendResult(callId, {
-        id,
-        pubkeyHex:    kp.public_key_hex(),
-        pubkeyBase58: kp.public_key_base58(),
-      });
+      const kp         = new WasmKeypair();
+      const id         = kp.id();
+      const secretHex  = kp.secret_key_hex();
+      const pubkeyHex  = kp.public_key_hex();
+      const pubkeyB58  = kp.public_key_base58();
       kp.free();
+
+      // Persist to native BEFORE resolving.
+      saveSecretToNative(id, secretHex);
+
+      // Warm memory cache.
+      keypairs.set(id, secretHex);
+
+      sendResult(callId, { id, pubkeyHex, pubkeyBase58: pubkeyB58 });
     } catch(e) { sendError(callId, e); }
   },
 
   /**
-   * Load a previously-generated keypair from its hex-encoded secret key.
-   * Called by the native layer after retrieving the secret from SecureStore.
+   * Bulk-restore keypairs from native secure store into the WASM memory cache.
+   * Called by the native layer immediately after bridgeDidBecomeReady.
+   *
+   * @param keysJson  JSON array: [{ id: string, secretHex: string }, …]
+   */
+  async restoreKeypairs(callId, keysJson) {
+    try {
+      const keys = JSON.parse(keysJson);
+      for (const { id, secretHex } of keys) {
+        keypairs.set(id, secretHex);
+      }
+      sendResult(callId, { restored: keys.length });
+    } catch(e) { sendError(callId, e); }
+  },
+
+  /**
+   * Load a single keypair from its secret hex (used for lazy on-demand load
+   * when the cache is cold for a specific id).
    */
   async loadKeypair(callId, id, secretKeyHex) {
     try {
       const kp = WasmKeypair.from_secret_hex(secretKeyHex);
-      keypairs.set(id, { secretKeyHex });
+      keypairs.set(id, secretKeyHex);
       sendResult(callId, {
         id,
         pubkeyHex:    kp.public_key_hex(),
@@ -110,7 +138,7 @@ window.AirSign = {
     } catch(e) { sendError(callId, e); }
   },
 
-  /** Evict a keypair from in-memory cache. */
+  /** Evict a keypair from the memory cache. */
   async deleteKeypair(callId, id) {
     keypairs.delete(id);
     sendResult(callId, null);
@@ -120,13 +148,15 @@ window.AirSign = {
 
   /**
    * Sign a Solana transaction (base64-encoded wire format).
+   * Requires the keypair to be in the memory cache (either warmed on startup
+   * by restoreKeypairs or lazily loaded by the native ensureLoaded helper).
    * Returns { signatureHex, signatureBase58 }.
    */
   async signTransaction(callId, id, txBase64) {
     try {
-      const entry = keypairs.get(id);
-      if (!entry) throw new Error(`Keypair ${id} not loaded`);
-      const kp  = WasmKeypair.from_secret_hex(entry.secretKeyHex);
+      const secretHex = keypairs.get(id);
+      if (!secretHex) throw new Error(`Keypair ${id} not in cache`);
+      const kp  = WasmKeypair.from_secret_hex(secretHex);
       const sig = kp.sign_transaction_base64(txBase64);
       sendResult(callId, {
         signatureHex:    sig.hex(),
@@ -142,9 +172,9 @@ window.AirSign = {
    */
   async signMessage(callId, id, messageBase64) {
     try {
-      const entry = keypairs.get(id);
-      if (!entry) throw new Error(`Keypair ${id} not loaded`);
-      const kp  = WasmKeypair.from_secret_hex(entry.secretKeyHex);
+      const secretHex = keypairs.get(id);
+      if (!secretHex) throw new Error(`Keypair ${id} not in cache`);
+      const kp  = WasmKeypair.from_secret_hex(secretHex);
       const sig = kp.sign_message_base64(messageBase64);
       sendResult(callId, {
         signatureHex:    sig.hex(),
@@ -154,13 +184,8 @@ window.AirSign = {
     } catch(e) { sendError(callId, e); }
   },
 
-  // ── Transaction inspection ───────────────────────────────────────────────────
+  // ── Transaction inspection ────────────────────────────────────────────────────
 
-  /**
-   * Parse and classify a Solana transaction.
-   * Returns InspectResult { feePayer, recentBlockhash, feeLamports,
-   *   riskLevel, instructions[] }.
-   */
   async inspectTransaction(callId, txBase64) {
     try {
       const result = JSON.parse(inspectTransactionJson(txBase64));
@@ -168,12 +193,8 @@ window.AirSign = {
     } catch(e) { sendError(callId, e); }
   },
 
-  // ── Fountain encode/decode ───────────────────────────────────────────────────
+  // ── Fountain encode/decode ────────────────────────────────────────────────────
 
-  /**
-   * Encode a payload (base64) into `targetFrames` fountain-coded QR frames.
-   * Returns { frames: string[], totalFrames: number }.
-   */
   async fountainEncode(callId, payloadBase64, targetFrames) {
     try {
       const bytes   = Uint8Array.from(atob(payloadBase64), c => c.charCodeAt(0));
@@ -190,10 +211,6 @@ window.AirSign = {
     } catch(e) { sendError(callId, e); }
   },
 
-  /**
-   * Feed a fountain frame into a decoder session.
-   * Returns { complete: boolean, payload?: string }.
-   */
   async fountainDecodeAdd(callId, sessionId, frameBase64, totalBlocks) {
     try {
       if (!recvSessions.has(sessionId)) {
@@ -214,7 +231,6 @@ window.AirSign = {
     } catch(e) { sendError(callId, e); }
   },
 
-  /** Reset / discard a fountain decoder session. */
   async fountainDecodeReset(callId, sessionId) {
     const session = recvSessions.get(sessionId);
     if (session) { session.free(); recvSessions.delete(sessionId); }
@@ -222,12 +238,12 @@ window.AirSign = {
   },
 };
 
-// ─── Initialise WASM and signal readiness ─────────────────────────────────────
+// ─── Initialise WASM ─────────────────────────────────────────────────────────
 (async () => {
   try {
     await init("./wasm/afterimage_wasm_bg.wasm");
-    // Signal to the native layer that the bridge is ready.
-    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.airSignReady) {
+    // Signal ready — native will immediately call restoreKeypairs().
+    if (window.webkit?.messageHandlers?.airSignReady) {
       window.webkit.messageHandlers.airSignReady.postMessage("ready");
     } else if (window.AirSignBridge) {
       window.AirSignBridge.onReady();

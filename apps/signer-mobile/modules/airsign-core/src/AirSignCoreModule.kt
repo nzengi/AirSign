@@ -1,26 +1,31 @@
 /**
- * AirSignCoreModule.kt — Android v2 WebView bridge for AirSignCore.
+ * AirSignCoreModule.kt — Android v2.1 WebView bridge for AirSignCore.
+ *
+ * v2.1 changes vs v2:
+ *   · JsBridge.saveSecret(id, secretHex) @JavascriptInterface — called by the
+ *     bridge HTML immediately after generating a keypair, before the Promise
+ *     resolves. The secret is persisted to Android Keystore + SharedPreferences
+ *     without ever appearing in a Promise result on the RN side.
+ *   · onReady(): after WASM init, all stored {id, secretHex} pairs are read
+ *     from the Keystore and passed to AirSign.restoreKeypairs() so the WASM
+ *     memory cache is warm before any sign call arrives (no per-call loadKeypair
+ *     round-trip required after app restart).
  *
  * Architecture:
  *   ┌─────────────────────┐   evaluateJavascript()
  *   │ Expo AsyncFunction  │ ──────────────────────▶ WebView
  *   │ (JS thread)         │                         (airsign_bridge.html)
- *   │                     │ ◀── @JavascriptInterface  postResult()
+ *   │                     │ ◀── @JavascriptInterface callbacks
  *   └─────────────────────┘
  *
- * Key storage (v2):
- *   · WASM generates the Ed25519 keypair inside WebAssembly linear memory.
- *   · After generation the secret key hex is returned to the Kotlin layer.
- *   · The secret is encrypted with AES-256-GCM using a key that lives in
- *     the Android Keystore (StrongBox / TEE backed where available), then
- *     the ciphertext is stored in EncryptedSharedPreferences.
- *   · On sign, the Kotlin layer decrypts the secret and calls
- *     AirSign.loadKeypair() so WASM can perform the Ed25519 operation.
+ * @JavascriptInterface callbacks (JS → native):
+ *   onReady()                    → isReady = true; drain queue; restoreKeypairs
+ *   saveSecret(id, secretHex)    → saveToKeystore(id, secretHex)
+ *   postResult(callId, payload)  → resolve/reject pending Promise
  *
- * Thread model:
- *   · WebView.loadUrl / evaluateJavascript must be called on the main thread.
- *   · @JavascriptInterface methods are called on a dedicated JS thread.
- *   · Expo Promises are resolved on a background thread after the JS callback.
+ * Key storage:
+ *   Android Keystore AES-256-GCM key per keypair id (TEE / StrongBox).
+ *   Ciphertext stored in SharedPreferences.
  */
 
 package expo.modules.airsigncore
@@ -38,6 +43,7 @@ import android.webkit.WebViewClient
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import org.json.JSONArray
 import org.json.JSONObject
 import java.security.KeyStore
 import java.util.UUID
@@ -70,6 +76,8 @@ class AirSignCoreModule : Module() {
     // ── Key management ──────────────────────────────────────────────────────────
 
     AsyncFunction("generateKeypair") { promise: Promise ->
+      // The bridge HTML calls AirSignBridge.saveSecret() automatically before
+      // posting the result, so we just forward {id, pubkeyHex, pubkeyBase58}.
       call("generateKeypair", emptyList(), promise)
     }
 
@@ -89,6 +97,8 @@ class AirSignCoreModule : Module() {
     }
 
     // ── Signing ──────────────────────────────────────────────────────────────────
+    // Cache is warm after restoreKeypairs on startup; ensureLoaded is a safety
+    // net for the rare case where the WebView was recreated mid-session.
 
     AsyncFunction("signTransaction") { id: String, txBase64: String, promise: Promise ->
       ensureLoaded(id) { call("signTransaction", listOf(id, txBase64), promise) }
@@ -123,33 +133,26 @@ class AirSignCoreModule : Module() {
 
   private fun setupWebView() {
     val ctx = appContext.reactContext ?: return
-    val wv = WebView(ctx)
+    val wv  = WebView(ctx)
 
     wv.settings.apply {
-      javaScriptEnabled = true
-      allowFileAccess = true
-      allowContentAccess = false
-      // Block network — fully air-gapped.
-      blockNetworkLoads = true
-      cacheMode = WebSettings.LOAD_NO_CACHE
+      javaScriptEnabled    = true
+      allowFileAccess      = true
+      allowContentAccess   = false
+      blockNetworkLoads    = true
+      cacheMode            = WebSettings.LOAD_NO_CACHE
     }
-
-    // Disable remote debugging in production builds.
     WebView.setWebContentsDebuggingEnabled(false)
 
     wv.webViewClient = object : WebViewClient() {
-      override fun shouldOverrideUrlLoading(view: WebView?, url: android.webkit.WebResourceRequest?): Boolean {
-        // Block all navigation except the initial file:// load.
-        return url?.isForMainFrame == true && url.url?.scheme != "file"
-      }
+      override fun shouldOverrideUrlLoading(
+        view: WebView?,
+        request: android.webkit.WebResourceRequest?
+      ): Boolean = request?.isForMainFrame == true && request.url?.scheme != "file"
     }
 
-    // Expose the native callback interface to JS.
     wv.addJavascriptInterface(JsBridge(), "AirSignBridge")
-
     webView = wv
-
-    // Load bridge HTML from assets.
     wv.loadUrl("file:///android_asset/airsign_core/airsign_bridge.html")
   }
 
@@ -171,24 +174,19 @@ class AirSignCoreModule : Module() {
           append(",")
           when (arg) {
             is String -> {
-              val escaped = arg
+              val esc = arg
                 .replace("\\", "\\\\")
                 .replace("\"", "\\\"")
                 .replace("\n", "\\n")
                 .replace("\r", "\\r")
-              append("\"$escaped\"")
+              append("\"$esc\"")
             }
-            is Int -> append(arg)
-            else  -> append("null")
+            is Int  -> append(arg)
+            else    -> append("null")
           }
         }
       }
-      val js = "AirSign.$method($jsArgs)"
-      mainHandler.post {
-        wv.evaluateJavascript(js) { _ ->
-          // Result arrives async via AirSignBridge.postResult()
-        }
-      }
+      mainHandler.post { wv.evaluateJavascript("AirSign.$method($jsArgs)", null) }
     }
 
     synchronized(readyLock) {
@@ -196,23 +194,26 @@ class AirSignCoreModule : Module() {
     }
   }
 
-  // ── Ensure keypair is loaded into WASM before signing ────────────────────────
+  // ── Ensure keypair warm (safety net for cold cache) ───────────────────────────
 
   private fun ensureLoaded(id: String, then: () -> Unit) {
-    val secretHex = loadSecretFromKeystore(id) ?: run { then(); return }
-    val loadId = UUID.randomUUID().toString()
-    val wv = webView ?: run { then(); return }
+    val secretHex  = loadSecretFromKeystore(id) ?: run { then(); return }
+    val wv         = webView                    ?: run { then(); return }
+    val loadId     = UUID.randomUUID().toString()
     val escapedHex = secretHex.replace("\\", "\\\\").replace("\"", "\\\"")
-    val js = "AirSign.loadKeypair(\"$loadId\",\"$id\",\"$escapedHex\")"
-    mainHandler.post {
-      wv.evaluateJavascript(js) { _ -> then() }
-    }
+    val js         = "AirSign.loadKeypair(\"$loadId\",\"$id\",\"$escapedHex\")"
+    mainHandler.post { wv.evaluateJavascript(js) { _ -> then() } }
   }
 
   // ── @JavascriptInterface ──────────────────────────────────────────────────────
 
   inner class JsBridge {
-    /** Called by airsign_bridge.html when the WASM is initialised. */
+
+    /**
+     * Called by airsign_bridge.html when WASM is initialised.
+     * Drains the pending call queue and bulk-restores all stored keypairs
+     * into the WASM memory cache via AirSign.restoreKeypairs().
+     */
     @JavascriptInterface
     fun onReady() {
       synchronized(readyLock) {
@@ -221,12 +222,41 @@ class AirSignCoreModule : Module() {
         readyQueue.clear()
         queued.forEach { it.run() }
       }
+      // Build JSON array of {id, secretHex} pairs from the Keystore.
+      val ids   = listKeystoreIds()
+      val array = JSONArray()
+      for (id in ids) {
+        val secretHex = loadSecretFromKeystore(id) ?: continue
+        array.put(JSONObject().put("id", id).put("secretHex", secretHex))
+      }
+      if (array.length() == 0) return
+
+      val wv = webView ?: return
+      // Escape the JSON for safe embedding into the JS string argument.
+      val json    = array.toString()
+      val escaped = json.replace("\\", "\\\\").replace("\"", "\\\"")
+      val callId  = UUID.randomUUID().toString()
+      val js      = "AirSign.restoreKeypairs(\"$callId\",\"$escaped\")"
+      mainHandler.post { wv.evaluateJavascript(js, null) }
+    }
+
+    /**
+     * Called by airsign_bridge.html immediately after generating a keypair,
+     * BEFORE the Promise result is posted. Saves the secret to the Keystore.
+     *
+     * @param id        keypair UUID
+     * @param secretHex Ed25519 secret key as lowercase hex string
+     */
+    @JavascriptInterface
+    fun saveSecret(id: String, secretHex: String) {
+      saveToKeystore(id, secretHex)
     }
 
     /**
      * Called by airsign_bridge.html with the JSON result of every async call.
-     * @param callId  opaque UUID matching the pending Promise entry
-     * @param payload JSON string: { callId, ok, result|error }
+     *
+     * @param callId  opaque UUID matching the pending Promise
+     * @param payload JSON string: { callId, ok, result | error }
      */
     @JavascriptInterface
     fun postResult(callId: String, payload: String) {
@@ -235,14 +265,8 @@ class AirSignCoreModule : Module() {
         val json = JSONObject(payload)
         val ok   = json.getBoolean("ok")
         if (ok) {
-          // Unwrap the nested result object/value.
           val result = if (json.isNull("result")) null else json.get("result")
-          // Convert JSONObject to a Map so Expo can serialise it.
-          val mapped = when (result) {
-            is JSONObject -> jsonToMap(result)
-            else          -> result
-          }
-          promise.resolve(mapped)
+          promise.resolve(if (result is JSONObject) jsonToMap(result) else result)
         } else {
           promise.reject("WASM_ERROR", json.optString("error", "unknown"), null)
         }
@@ -251,13 +275,10 @@ class AirSignCoreModule : Module() {
       }
     }
 
-    private fun jsonToMap(obj: JSONObject): Map<String, Any?> {
-      val map = mutableMapOf<String, Any?>()
-      obj.keys().forEach { key ->
-        map[key] = if (obj.isNull(key)) null else obj.get(key)
+    private fun jsonToMap(obj: JSONObject): Map<String, Any?> =
+      obj.keys().asSequence().associateWith { key ->
+        if (obj.isNull(key)) null else obj.get(key)
       }
-      return map
-    }
   }
 
   // ── Android Keystore helpers ──────────────────────────────────────────────────
@@ -273,65 +294,56 @@ class AirSignCoreModule : Module() {
   private fun getOrCreateAesKey(id: String): SecretKey {
     val alias = "$KEY_ALIAS_PREFIX$id"
     val ks    = KeyStore.getInstance(KEYSTORE_PROVIDER).also { it.load(null) }
-    val entry = ks.getEntry(alias, null)
-    if (entry is KeyStore.SecretKeyEntry) return entry.secretKey
+    (ks.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
 
     val keyGen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
     keyGen.init(
-      KeyGenParameterSpec.Builder(alias,
-        KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+      KeyGenParameterSpec.Builder(
+        alias,
+        KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+      )
         .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
         .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
         .setKeySize(256)
-        // Require user authentication (biometric/PIN) — comment out for dev builds.
-        // .setUserAuthenticationRequired(true)
         .build()
     )
     return keyGen.generateKey()
   }
 
   private fun saveToKeystore(id: String, secretHex: String) {
-    val ctx = appContext.reactContext ?: return
+    val ctx    = appContext.reactContext ?: return
     val key    = getOrCreateAesKey(id)
-    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-    cipher.init(Cipher.ENCRYPT_MODE, key)
+    val cipher = Cipher.getInstance("AES/GCM/NoPadding").also { it.init(Cipher.ENCRYPT_MODE, key) }
     val iv         = cipher.iv
     val ciphertext = cipher.doFinal(secretHex.toByteArray(Charsets.UTF_8))
-    val blob = Base64.encodeToString(iv + ciphertext, Base64.NO_WRAP)
-    ctx.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-      .edit().putString(id, blob).apply()
+    val blob       = Base64.encodeToString(iv + ciphertext, Base64.NO_WRAP)
+    ctx.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit().putString(id, blob).apply()
   }
 
-  private fun loadSecretFromKeystore(id: String): String? {
-    return try {
-      val ctx  = appContext.reactContext ?: return null
-      val blob = ctx.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-        .getString(id, null) ?: return null
-      val raw        = Base64.decode(blob, Base64.NO_WRAP)
-      val iv         = raw.sliceArray(0 until GCM_IV_LENGTH)
-      val ciphertext = raw.sliceArray(GCM_IV_LENGTH until raw.size)
-      val key        = getOrCreateAesKey(id)
-      val cipher     = Cipher.getInstance("AES/GCM/NoPadding")
-      cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LENGTH, iv))
-      cipher.doFinal(ciphertext).toString(Charsets.UTF_8)
-    } catch (e: Exception) {
-      null
+  private fun loadSecretFromKeystore(id: String): String? = runCatching {
+    val ctx  = appContext.reactContext ?: return null
+    val blob = ctx.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getString(id, null) ?: return null
+    val raw        = Base64.decode(blob, Base64.NO_WRAP)
+    val iv         = raw.sliceArray(0 until GCM_IV_LENGTH)
+    val ciphertext = raw.sliceArray(GCM_IV_LENGTH until raw.size)
+    val key    = getOrCreateAesKey(id)
+    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+      .also { it.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LENGTH, iv)) }
+    cipher.doFinal(ciphertext).toString(Charsets.UTF_8)
+  }.getOrNull()
+
+  private fun deleteFromKeystore(id: String) {
+    appContext.reactContext
+      ?.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+      ?.edit()?.remove(id)?.apply()
+    runCatching {
+      KeyStore.getInstance(KEYSTORE_PROVIDER).also { it.load(null) }.deleteEntry("$KEY_ALIAS_PREFIX$id")
     }
   }
 
-  private fun deleteFromKeystore(id: String) {
-    val ctx = appContext.reactContext ?: return
-    ctx.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-      .edit().remove(id).apply()
-    try {
-      val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).also { it.load(null) }
-      ks.deleteEntry("$KEY_ALIAS_PREFIX$id")
-    } catch (_: Exception) {}
-  }
-
-  private fun listKeystoreIds(): List<String> {
-    val ctx = appContext.reactContext ?: return emptyList()
-    return ctx.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-      .all.keys.toList()
-  }
+  private fun listKeystoreIds(): List<String> =
+    appContext.reactContext
+      ?.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+      ?.all?.keys?.toList()
+      ?: emptyList()
 }
