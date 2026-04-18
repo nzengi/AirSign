@@ -1068,6 +1068,618 @@ impl WasmDkgParticipant {
     }
 }
 
+// ─── WasmSquads ───────────────────────────────────────────────────────────────
+
+/// Browser-side Squads v4 instruction builder.
+///
+/// Provides PDA derivation and Borsh-serialised instruction data for all core
+/// Squads v4 operations **without** any RPC call or private key.  The caller
+/// is responsible for submitting the resulting transaction via
+/// [`WasmBroadcaster`] or any other Solana JSON-RPC client.
+///
+/// # Example (JavaScript)
+/// ```js
+/// const squads = new WasmSquads();
+/// const info   = JSON.parse(squads.derive_pda(createKey));
+/// // → { multisig_pda: "…", vault_pda: "…", bump: 255 }
+///
+/// const data   = squads.multisig_create_data(JSON.stringify(config));
+/// // → hex-encoded Borsh instruction bytes ready to attach to a transaction
+/// ```
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub struct WasmSquads;
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+impl WasmSquads {
+    /// Create a new `WasmSquads` helper.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
+    pub fn new() -> WasmSquads {
+        WasmSquads
+    }
+
+    // ── PDA derivation ───────────────────────────────────────────────────────
+
+    /// Derive the multisig PDA and default vault PDA for `create_key`.
+    ///
+    /// Returns a JSON object:
+    /// ```json
+    /// {
+    ///   "multisig_pda": "…",
+    ///   "vault_pda":    "…",
+    ///   "multisig_bump": 255,
+    ///   "vault_bump":    255
+    /// }
+    /// ```
+    pub fn derive_pda(&self, create_key: &str) -> Result<String, JsValue> {
+        let prog = squads_program_id_bytes()
+            .map_err(|e| JsValue::from_str(&e))?;
+        let ck = bs58_decode(create_key)
+            .map_err(|e| JsValue::from_str(&format!("invalid create_key: {e}")))?;
+
+        let (ms_bytes, ms_bump) = find_program_address(
+            &[b"multisig", ck.as_slice()],
+            &prog,
+        ).ok_or_else(|| JsValue::from_str("PDA not found for multisig"))?;
+
+        let (vt_bytes, vt_bump) = find_program_address(
+            &[b"multisig", ms_bytes.as_slice(), b"vault", &[0u8]],
+            &prog,
+        ).ok_or_else(|| JsValue::from_str("PDA not found for vault"))?;
+
+        let out = serde_json::json!({
+            "multisig_pda":  bs58_encode(&ms_bytes),
+            "vault_pda":     bs58_encode(&vt_bytes),
+            "multisig_bump": ms_bump,
+            "vault_bump":    vt_bump,
+        });
+        serde_json::to_string(&out).map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    // ── Instruction data builders ─────────────────────────────────────────────
+
+    /// Build Borsh-encoded `multisig_create_v2` instruction data.
+    ///
+    /// `config_json`:
+    /// ```json
+    /// {
+    ///   "threshold": 2,
+    ///   "members": [
+    ///     { "key": "<base58 pubkey>", "permissions": 7 }
+    ///   ],
+    ///   "time_lock": 0,
+    ///   "memo": null
+    /// }
+    /// ```
+    /// Returns the instruction data as a lowercase hex string.
+    pub fn multisig_create_data(&self, config_json: &str) -> Result<String, JsValue> {
+        let v: serde_json::Value = serde_json::from_str(config_json)
+            .map_err(|e| JsValue::from_str(&format!("JSON parse: {e}")))?;
+        let threshold = v["threshold"].as_u64()
+            .ok_or_else(|| JsValue::from_str("missing threshold"))? as u16;
+        let time_lock = v["time_lock"].as_u64().unwrap_or(0) as u32;
+        let members_arr = v["members"].as_array()
+            .ok_or_else(|| JsValue::from_str("missing members"))?;
+
+        let disc = anchor_discriminator("multisig_create_v2");
+        let mut buf = disc.to_vec();
+
+        // config_authority: Option<Pubkey> = None
+        buf.push(0u8);
+        // threshold: u16 (LE)
+        buf.extend_from_slice(&threshold.to_le_bytes());
+        // members: Vec<Member>
+        let member_count = members_arr.len() as u32;
+        buf.extend_from_slice(&member_count.to_le_bytes());
+        for m in members_arr {
+            let key_b58 = m["key"].as_str()
+                .ok_or_else(|| JsValue::from_str("member missing key"))?;
+            let key_bytes = bs58_decode(key_b58)
+                .map_err(|e| JsValue::from_str(&format!("member key decode: {e}")))?;
+            if key_bytes.len() != 32 {
+                return Err(JsValue::from_str("member key must be 32 bytes"));
+            }
+            buf.extend_from_slice(&key_bytes);
+            let permissions = m["permissions"].as_u64().unwrap_or(7) as u32;
+            buf.extend_from_slice(&permissions.to_le_bytes());
+        }
+        // time_lock: u32 (LE)
+        buf.extend_from_slice(&time_lock.to_le_bytes());
+        // rent_collector: Option<Pubkey> = None
+        buf.push(0u8);
+        // memo: Option<String> = None
+        buf.push(0u8);
+
+        Ok(hex::encode(&buf))
+    }
+
+    /// Build Borsh-encoded `proposal_approve` instruction data.
+    ///
+    /// `memo` is optional (pass empty string for none).
+    pub fn proposal_approve_data(&self, memo: &str) -> String {
+        let disc = anchor_discriminator("proposal_approve");
+        let mut buf = disc.to_vec();
+        if memo.is_empty() {
+            buf.push(0u8); // Option::None
+        } else {
+            buf.push(1u8); // Option::Some
+            let bytes = memo.as_bytes();
+            buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(bytes);
+        }
+        hex::encode(&buf)
+    }
+
+    /// Build Borsh-encoded `proposal_reject` instruction data.
+    pub fn proposal_reject_data(&self, memo: &str) -> String {
+        let disc = anchor_discriminator("proposal_reject");
+        let mut buf = disc.to_vec();
+        if memo.is_empty() {
+            buf.push(0u8);
+        } else {
+            buf.push(1u8);
+            let bytes = memo.as_bytes();
+            buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(bytes);
+        }
+        hex::encode(&buf)
+    }
+
+    /// Build Borsh-encoded `proposal_create` instruction data.
+    ///
+    /// `transaction_index`: the vault transaction index (u64 LE).
+    pub fn proposal_create_data(&self, transaction_index: u64, draft: bool) -> String {
+        let disc = anchor_discriminator("proposal_create");
+        let mut buf = disc.to_vec();
+        buf.extend_from_slice(&transaction_index.to_le_bytes());
+        buf.push(if draft { 1u8 } else { 0u8 });
+        hex::encode(&buf)
+    }
+
+    /// Compute the Anchor discriminator for any instruction name.
+    ///
+    /// Returns the 8-byte discriminator as a hex string.
+    pub fn discriminator(&self, instruction_name: &str) -> String {
+        hex::encode(anchor_discriminator(instruction_name))
+    }
+
+    /// Return the Squads v4 program ID.
+    pub fn program_id() -> String {
+        "SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf".to_string()
+    }
+
+    /// Build a minimal JSON-RPC account info request body to fetch a multisig.
+    pub fn build_get_account_body(&self, pda: &str, request_id: u64) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"getAccountInfo","params":["{pda}",{{"encoding":"base64"}}]}}"#,
+            id = request_id,
+            pda = pda,
+        )
+    }
+}
+
+impl Default for WasmSquads {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ─── WasmBroadcaster ──────────────────────────────────────────────────────────
+
+/// Browser-side Solana JSON-RPC helper.
+///
+/// **Does not perform any HTTP requests itself.**  Instead it builds the correct
+/// JSON-RPC request bodies and parses the corresponding responses, letting the
+/// caller use `fetch()` or any HTTP client they prefer.
+///
+/// # Example (JavaScript)
+/// ```js
+/// const bc = new WasmBroadcaster("https://api.devnet.solana.com");
+///
+/// const blockhashBody = bc.build_get_latest_blockhash_body(1);
+/// const resp  = await fetch(bc.rpc_url(), { method:"POST", body: blockhashBody, … });
+/// const bh    = bc.parse_get_latest_blockhash_response(await resp.text());
+///
+/// // … sign the transaction …
+///
+/// const sendBody = bc.build_send_transaction_body(txB64, 2);
+/// const sig      = bc.parse_send_transaction_response(await (await fetch(…)).text());
+/// console.log(bc.explorer_url(sig));
+/// ```
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub struct WasmBroadcaster {
+    rpc_url: String,
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+impl WasmBroadcaster {
+    /// Create a new broadcaster pointed at `rpc_url`.
+    ///
+    /// Common values:
+    /// - `"https://api.mainnet-beta.solana.com"`
+    /// - `"https://api.devnet.solana.com"`
+    /// - `"http://localhost:8899"` (local validator)
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
+    pub fn new(rpc_url: &str) -> WasmBroadcaster {
+        WasmBroadcaster { rpc_url: rpc_url.to_string() }
+    }
+
+    /// The configured RPC URL.
+    pub fn rpc_url(&self) -> String {
+        self.rpc_url.clone()
+    }
+
+    /// Cluster name derived from the RPC URL (`"mainnet"`, `"devnet"`,
+    /// `"testnet"`, `"localnet"`, or `"custom"`).
+    pub fn cluster_name(&self) -> String {
+        if self.rpc_url.contains("mainnet-beta") || self.rpc_url.contains("mainnet") {
+            "mainnet".to_string()
+        } else if self.rpc_url.contains("devnet") {
+            "devnet".to_string()
+        } else if self.rpc_url.contains("testnet") {
+            "testnet".to_string()
+        } else if self.rpc_url.contains("localhost") || self.rpc_url.contains("127.0.0.1") {
+            "localnet".to_string()
+        } else {
+            "custom".to_string()
+        }
+    }
+
+    // ── Request builders ──────────────────────────────────────────────────────
+
+    /// Build the JSON-RPC body for `sendTransaction`.
+    ///
+    /// `tx_b64`: the base64-encoded, fully-signed serialised transaction.
+    pub fn build_send_transaction_body(&self, tx_b64: &str, request_id: u64) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"sendTransaction","params":["{tx}",{{"encoding":"base64","preflightCommitment":"confirmed"}}]}}"#,
+            id = request_id,
+            tx = tx_b64,
+        )
+    }
+
+    /// Build the JSON-RPC body for `getBalance`.
+    pub fn build_get_balance_body(&self, pubkey_b58: &str, request_id: u64) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"getBalance","params":["{pk}",{{"commitment":"confirmed"}}]}}"#,
+            id = request_id,
+            pk = pubkey_b58,
+        )
+    }
+
+    /// Build the JSON-RPC body for `requestAirdrop`.
+    pub fn build_request_airdrop_body(
+        &self,
+        pubkey_b58: &str,
+        lamports: u64,
+        request_id: u64,
+    ) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"requestAirdrop","params":["{pk}",{lam}]}}"#,
+            id = request_id,
+            pk = pubkey_b58,
+            lam = lamports,
+        )
+    }
+
+    /// Build the JSON-RPC body for `getLatestBlockhash`.
+    pub fn build_get_latest_blockhash_body(&self, request_id: u64) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"getLatestBlockhash","params":[{{"commitment":"confirmed"}}]}}"#,
+            id = request_id,
+        )
+    }
+
+    /// Build the JSON-RPC body for `getSignatureStatuses`.
+    pub fn build_get_signature_statuses_body(&self, signature: &str, request_id: u64) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"getSignatureStatuses","params":[["{sig}"],{{"searchTransactionHistory":true}}]}}"#,
+            id = request_id,
+            sig = signature,
+        )
+    }
+
+    // ── Response parsers ──────────────────────────────────────────────────────
+
+    /// Extract the transaction signature from a `sendTransaction` response.
+    ///
+    /// Returns `Err` if the response contains a JSON-RPC error.
+    pub fn parse_send_transaction_response(&self, json: &str) -> Result<String, JsValue> {
+        let v: serde_json::Value = serde_json::from_str(json)
+            .map_err(|e| JsValue::from_str(&format!("JSON parse: {e}")))?;
+        if let Some(err) = v.get("error") {
+            return Err(JsValue::from_str(&format!("RPC error: {err}")));
+        }
+        v["result"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| JsValue::from_str("missing result field"))
+    }
+
+    /// Extract lamport balance from a `getBalance` response.
+    pub fn parse_get_balance_response(&self, json: &str) -> Result<u64, JsValue> {
+        let v: serde_json::Value = serde_json::from_str(json)
+            .map_err(|e| JsValue::from_str(&format!("JSON parse: {e}")))?;
+        if let Some(err) = v.get("error") {
+            return Err(JsValue::from_str(&format!("RPC error: {err}")));
+        }
+        v["result"]["value"]
+            .as_u64()
+            .ok_or_else(|| JsValue::from_str("missing result.value"))
+    }
+
+    /// Extract airdrop signature from a `requestAirdrop` response.
+    pub fn parse_request_airdrop_response(&self, json: &str) -> Result<String, JsValue> {
+        self.parse_send_transaction_response(json)
+    }
+
+    /// Extract the blockhash string from a `getLatestBlockhash` response.
+    pub fn parse_get_latest_blockhash_response(&self, json: &str) -> Result<String, JsValue> {
+        let v: serde_json::Value = serde_json::from_str(json)
+            .map_err(|e| JsValue::from_str(&format!("JSON parse: {e}")))?;
+        if let Some(err) = v.get("error") {
+            return Err(JsValue::from_str(&format!("RPC error: {err}")));
+        }
+        v["result"]["value"]["blockhash"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| JsValue::from_str("missing result.value.blockhash"))
+    }
+
+    // ── Explorer URLs ─────────────────────────────────────────────────────────
+
+    /// Solana Explorer URL for the given signature.
+    pub fn explorer_url(&self, signature: &str) -> String {
+        let cluster = self.cluster_name();
+        match cluster.as_str() {
+            "mainnet" => format!("https://explorer.solana.com/tx/{signature}"),
+            "localnet" => format!(
+                "https://explorer.solana.com/tx/{signature}?cluster=custom&customUrl=http%3A%2F%2Flocalhost%3A8899"
+            ),
+            c => format!("https://explorer.solana.com/tx/{signature}?cluster={c}"),
+        }
+    }
+
+    /// Solscan URL for the given signature.
+    pub fn solscan_url(&self, signature: &str) -> String {
+        let cluster = self.cluster_name();
+        match cluster.as_str() {
+            "mainnet" => format!("https://solscan.io/tx/{signature}"),
+            c => format!("https://solscan.io/tx/{signature}?cluster={c}"),
+        }
+    }
+}
+
+// ─── WasmKeyStore ─────────────────────────────────────────────────────────────
+
+/// In-session browser keypair store.
+///
+/// Holds Ed25519 keypairs in memory (indexed by user-defined label) for the
+/// duration of the browser session.  Use `export_hex` / `import_hex` to
+/// persist entries across sessions (the caller decides on the storage
+/// backend — localStorage, IndexedDB, server-side encrypted vault, etc.).
+///
+/// # Security note
+/// Keys live in JavaScript heap memory when returned to the caller.  For
+/// high-value keys, use a hardware wallet (Ledger) instead.
+///
+/// # Example (JavaScript)
+/// ```js
+/// const ks = new WasmKeyStore();
+/// const pubkey = ks.generate("treasury");
+/// const hex    = ks.export_hex("treasury");
+/// // store `hex` in localStorage …
+///
+/// const ks2 = new WasmKeyStore();
+/// const pub2 = ks2.import_hex("treasury", hex);
+/// assert(pubkey === pub2);
+/// ```
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub struct WasmKeyStore {
+    entries: std::collections::HashMap<String, [u8; 32]>, // label → 32-byte seed
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+impl WasmKeyStore {
+    /// Create an empty key store.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
+    pub fn new() -> WasmKeyStore {
+        WasmKeyStore {
+            entries: std::collections::HashMap::new(),
+        }
+    }
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    /// Generate a fresh Ed25519 keypair, store it under `label`, and return
+    /// the base58-encoded public key.
+    ///
+    /// Overwrites any existing entry with the same label.
+    pub fn generate(&mut self, label: &str) -> Result<String, JsValue> {
+        let kp = WasmKeypair::generate()?;
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&kp.secret_bytes()[..32]);
+        self.entries.insert(label.to_string(), seed);
+        Ok(kp.pubkey_b58())
+    }
+
+    /// Store an existing keypair (32-byte secret seed, big-endian) under `label`.
+    pub fn store(&mut self, label: &str, seed_bytes: &[u8]) -> Result<(), JsValue> {
+        if seed_bytes.len() != 32 {
+            return Err(JsValue::from_str("seed must be exactly 32 bytes"));
+        }
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(seed_bytes);
+        self.entries.insert(label.to_string(), seed);
+        Ok(())
+    }
+
+    /// Return the 32-byte secret seed for `label`.
+    pub fn load(&self, label: &str) -> Result<Vec<u8>, JsValue> {
+        self.entries
+            .get(label)
+            .map(|s| s.to_vec())
+            .ok_or_else(|| JsValue::from_str(&format!("label not found: {label}")))
+    }
+
+    /// Return `true` if `label` exists in the store.
+    pub fn exists(&self, label: &str) -> bool {
+        self.entries.contains_key(label)
+    }
+
+    /// Remove `label` from the store.  Returns `true` if it existed.
+    pub fn delete(&mut self, label: &str) -> bool {
+        self.entries.remove(label).is_some()
+    }
+
+    /// Number of stored keypairs.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Return `true` when no keypairs are stored.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    // ── Public key helpers ────────────────────────────────────────────────────
+
+    /// Return the base58-encoded public key for `label`.
+    pub fn pubkey_of(&self, label: &str) -> Result<String, JsValue> {
+        let seed = self.entries.get(label)
+            .ok_or_else(|| JsValue::from_str(&format!("label not found: {label}")))?;
+        let signing = ed25519_dalek::SigningKey::from_bytes(seed);
+        Ok(bs58_encode(signing.verifying_key().as_bytes()))
+    }
+
+    /// Return the raw public key bytes (32 bytes) for `label`.
+    pub fn pubkey_bytes_of(&self, label: &str) -> Result<Vec<u8>, JsValue> {
+        let seed = self.entries.get(label)
+            .ok_or_else(|| JsValue::from_str(&format!("label not found: {label}")))?;
+        let signing = ed25519_dalek::SigningKey::from_bytes(seed);
+        Ok(signing.verifying_key().as_bytes().to_vec())
+    }
+
+    // ── Import / Export ───────────────────────────────────────────────────────
+
+    /// Export the secret seed for `label` as a lowercase hex string.
+    ///
+    /// The caller is responsible for storing this securely (encrypt before
+    /// writing to localStorage/IndexedDB).
+    pub fn export_hex(&self, label: &str) -> Result<String, JsValue> {
+        let seed = self.entries.get(label)
+            .ok_or_else(|| JsValue::from_str(&format!("label not found: {label}")))?;
+        Ok(hex::encode(seed))
+    }
+
+    /// Import a secret seed from its hex representation and store under `label`.
+    ///
+    /// Returns the base58 public key on success.
+    pub fn import_hex(&mut self, label: &str, seed_hex: &str) -> Result<String, JsValue> {
+        let bytes = hex::decode(seed_hex)
+            .map_err(|e| JsValue::from_str(&format!("hex decode: {e}")))?;
+        self.store(label, &bytes)?;
+        self.pubkey_of(label)
+    }
+
+    /// Export all labels as a JSON array of strings.
+    pub fn list_labels_json(&self) -> String {
+        let labels: Vec<&str> = self.entries.keys().map(|s| s.as_str()).collect();
+        serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Sign `message` bytes with the key stored under `label`.
+    ///
+    /// Returns the 64-byte Ed25519 signature.
+    pub fn sign_with(&self, label: &str, message: &[u8]) -> Result<Vec<u8>, JsValue> {
+        use ed25519_dalek::Signer as _;
+        let seed = self.entries.get(label)
+            .ok_or_else(|| JsValue::from_str(&format!("label not found: {label}")))?;
+        let signing = ed25519_dalek::SigningKey::from_bytes(seed);
+        Ok(signing.sign(message).to_bytes().to_vec())
+    }
+}
+
+impl Default for WasmKeyStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ─── Squads v4 helpers (native only) ─────────────────────────────────────────
+
+/// Compute the Anchor instruction discriminator:
+/// `SHA256(b"global:" || name)[..8]`
+fn anchor_discriminator(name: &str) -> [u8; 8] {
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(b"global:");
+    hasher.update(name.as_bytes());
+    let hash = hasher.finalize();
+    let mut disc = [0u8; 8];
+    disc.copy_from_slice(&hash[..8]);
+    disc
+}
+
+/// Solana `find_program_address`: find (address_bytes, bump) such that the
+/// SHA-256 hash of `[seeds..., [bump], program_id, "ProgramDerivedAddress"]`
+/// is NOT a valid Ed25519 curve point.
+fn find_program_address(seeds: &[&[u8]], program_id: &[u8]) -> Option<([u8; 32], u8)> {
+    use sha2::{Sha256, Digest};
+    for bump in (0u8..=255).rev() {
+        let mut hasher = Sha256::new();
+        for seed in seeds {
+            hasher.update(seed);
+        }
+        hasher.update([bump]);
+        hasher.update(program_id);
+        hasher.update(b"ProgramDerivedAddress");
+        let hash: [u8; 32] = hasher.finalize().into();
+        // Valid PDA must be OFF the Ed25519 curve
+        if ed25519_dalek::VerifyingKey::from_bytes(&hash).is_err() {
+            return Some((hash, bump));
+        }
+    }
+    None
+}
+
+/// Decode a base58 string into bytes.
+fn bs58_decode(input: &str) -> Result<Vec<u8>, String> {
+    const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let mut table = [0u8; 128];
+    for (i, &c) in ALPHABET.iter().enumerate() {
+        table[c as usize] = i as u8;
+    }
+    let mut result: Vec<u8> = Vec::new();
+    for c in input.bytes() {
+        if c > 127 || (c != b'1' && table[c as usize] == 0 && !ALPHABET.contains(&c)) {
+            return Err(format!("invalid base58 character: {}", c as char));
+        }
+        let mut carry = if c == b'1' { 0usize } else { table[c as usize] as usize };
+        for byte in result.iter_mut() {
+            carry += (*byte as usize) * 58;
+            *byte = (carry & 0xff) as u8;
+            carry >>= 8;
+        }
+        while carry > 0 {
+            result.push((carry & 0xff) as u8);
+            carry >>= 8;
+        }
+    }
+    let leading_ones = input.bytes().take_while(|&b| b == b'1').count();
+    result.resize(result.len() + leading_ones, 0);
+    result.reverse();
+    Ok(result)
+}
+
+/// Decode the Squads v4 program ID into 32 raw bytes.
+fn squads_program_id_bytes() -> Result<Vec<u8>, String> {
+    let bytes = bs58_decode("SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf")?;
+    if bytes.len() != 32 {
+        return Err(format!("program ID decoded to {} bytes (expected 32)", bytes.len()));
+    }
+    Ok(bytes)
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 /// Minimal Base58 encoder (Bitcoin/Solana alphabet).

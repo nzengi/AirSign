@@ -1,5 +1,52 @@
 # Changelog
 
+## [5.0.0] — 2026-04-18
+
+### Added
+
+- **`crates/afterimage-wasm`** — new WASM bindings for all major subsystems
+  - `WasmSquads` — offline Squads v4 instruction builder exposed to JavaScript:
+    `derive_pda`, `create_multisig`, `approve_proposal`, `vault_transaction_create`
+  - `WasmBroadcaster` — browser-side RPC helper: `broadcast`, `get_balance`, `request_airdrop`
+  - `WasmKeyStore` — encrypted key management in WASM: `generate`, `load`, `exists`, `delete`
+  - 29 native unit tests in `crates/afterimage-wasm/tests/e2e.rs` (all green)
+
+- **`crates/afterimage-squads`** — 64-test suite (all green) covering:
+  - Anchor discriminator uniqueness and determinism
+  - PDA derivation (multisig, vault, transaction, proposal)
+  - `multisig_create_v2` instruction builder — success and all error paths
+  - `vault_transaction_create`, `proposal_create`, `proposal_approve`, `proposal_reject`, `vault_transaction_execute`
+  - Adapter round-trip: `ApprovalRequest` → unsigned `Transaction` → `AirSignSquadsPayload`
+
+- **`crates/afterimage-dkg`** — 23-test suite (all green) covering:
+  - Pedersen DKG 2-of-3 and 3-of-5 round-trips
+  - Invalid identifier (0), invalid threshold (t=0, t=1, t>n), malformed packages
+  - DKG key package compatibility with FROST signing
+
+- **`packages/react` (`@airsign/react`)** — 19 TypeScript tests (all green):
+  - `useSendSession`: idle state, start/stop/reset, frame advancement, `onComplete`, `onProgress`, missing WASM error, unmount cleanup
+  - `useRecvSession`: idle state, ingest progress, completion, `onComplete` with payload + filename, `onProgress`, reset, missing WASM error, no duplicate `onComplete`
+
+- **`docs/SECURITY_MODEL.md`** — comprehensive security documentation:
+  - STRIDE threat model (Spoofing, Tampering, Repudiation, Information Disclosure, DoS, Elevation of Privilege)
+  - RFC-style session protocol specification (key derivation, frame encoding, reassembly)
+  - FROST threshold signing protocol (RFC 9591) with security properties
+  - Squads v4 PDA derivation and instruction serialisation spec
+  - Keystore security parameters (Argon2id m=65536, ChaCha20-Poly1305)
+  - Ledger APDU integration security notes
+  - 18-item independent audit checklist (crypto, protocol, on-chain, WASM, supply chain)
+  - Known limitations and out-of-scope items
+
+### Security
+
+- All cryptographic operations verified against RFC test vectors in unit tests
+- No `unsafe` blocks outside the WASM FFI boundary (`afterimage-wasm/src/lib.rs`)
+- Argon2id KDF parameters (m=65536 KiB, t=3) enforced as non-user-overridable constants
+- FROST partial signature verification rejects invalid signers before aggregation
+- ChaCha20-Poly1305 tag verification occurs before any plaintext is consumed
+
+---
+
 ## [4.0.0] — 2026-04-18
 
 ### Added

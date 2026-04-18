@@ -7,7 +7,8 @@
 //! `tests/e2e_wasm.rs` and run via `wasm-pack test --headless --chrome`.
 
 use afterimage_wasm::{
-    recommended_frames, version, WasmKeypair, WasmRecvSession, WasmSendSession,
+    recommended_frames, version, WasmBroadcaster, WasmKeyStore, WasmKeypair, WasmRecvSession,
+    WasmSendSession, WasmSquads,
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -178,6 +179,238 @@ fn keypair_pubkey_b58_matches_known_vector() {
         "Base58 pubkey length {}: {b58}",
         b58.len()
     );
+}
+
+// ─── WasmSquads ───────────────────────────────────────────────────────────────
+
+#[test]
+fn squads_derive_pda_returns_valid_json() {
+    // Use a known 32-byte public key (all-zeros seed) encoded as base58
+    let seed = [0u8; 32];
+    let kp = WasmKeypair::from_seed(&seed).expect("kp");
+    let create_key = kp.pubkey_b58();
+
+    let squads = WasmSquads::new();
+    let json_str = squads.derive_pda(&create_key).expect("derive_pda");
+    let v: serde_json::Value = serde_json::from_str(&json_str).expect("parse JSON");
+
+    assert!(v["multisig_pda"].is_string(), "multisig_pda must be a string");
+    assert!(v["vault_pda"].is_string(), "vault_pda must be a string");
+    assert!(v["multisig_bump"].is_number(), "multisig_bump must be a number");
+    assert!(v["vault_bump"].is_number(), "vault_bump must be a number");
+
+    let ms_pda = v["multisig_pda"].as_str().unwrap();
+    let vt_pda = v["vault_pda"].as_str().unwrap();
+    // Base58 Solana addresses are 32–44 chars
+    assert!(ms_pda.len() >= 32 && ms_pda.len() <= 44, "multisig_pda len {}", ms_pda.len());
+    assert!(vt_pda.len() >= 32 && vt_pda.len() <= 44, "vault_pda len {}", vt_pda.len());
+    // PDAs must differ
+    assert_ne!(ms_pda, vt_pda);
+}
+
+#[test]
+fn squads_derive_pda_is_deterministic() {
+    let kp = WasmKeypair::from_seed(&[1u8; 32]).expect("kp");
+    let create_key = kp.pubkey_b58();
+    let squads = WasmSquads::new();
+    let a = squads.derive_pda(&create_key).expect("a");
+    let b = squads.derive_pda(&create_key).expect("b");
+    assert_eq!(a, b, "PDA derivation must be deterministic");
+}
+
+#[test]
+fn squads_multisig_create_data_structure() {
+    let squads = WasmSquads::new();
+    let member_key = WasmKeypair::from_seed(&[2u8; 32]).expect("kp").pubkey_b58();
+    let config = serde_json::json!({
+        "threshold": 2,
+        "members": [
+            {"key": member_key, "permissions": 7}
+        ],
+        "time_lock": 0,
+        "memo": null
+    })
+    .to_string();
+    let hex_data = squads.multisig_create_data(&config).expect("create_data");
+    let bytes = hex::decode(&hex_data).expect("hex decode");
+    // 8 discriminator + 1 option + 2 threshold + 4 member count + 32 key + 4 perms + 4 time_lock + 1 rent + 1 memo = 57
+    assert_eq!(bytes.len(), 57, "instruction data must be 57 bytes");
+    // First 8 bytes are the discriminator (non-zero)
+    assert!(bytes[..8].iter().any(|&b| b != 0), "discriminator must be non-zero");
+}
+
+#[test]
+fn squads_discriminator_known_values() {
+    let squads = WasmSquads::new();
+    // Discriminator for "proposal_approve" must be 8 bytes (16 hex chars)
+    let disc_hex = squads.discriminator("proposal_approve");
+    assert_eq!(disc_hex.len(), 16, "discriminator must be 8 bytes = 16 hex chars");
+    // Two different names must produce different discriminators
+    let d1 = squads.discriminator("proposal_approve");
+    let d2 = squads.discriminator("proposal_reject");
+    assert_ne!(d1, d2, "different instructions must have different discriminators");
+}
+
+#[test]
+fn squads_proposal_approve_data_no_memo() {
+    let squads = WasmSquads::new();
+    let data = squads.proposal_approve_data("");
+    let bytes = hex::decode(&data).expect("hex");
+    // 8 discriminator + 1 option-none = 9 bytes
+    assert_eq!(bytes.len(), 9);
+    assert_eq!(bytes[8], 0u8, "None variant should be 0");
+}
+
+#[test]
+fn squads_proposal_create_data_structure() {
+    let squads = WasmSquads::new();
+    let data = squads.proposal_create_data(42, false);
+    let bytes = hex::decode(&data).expect("hex");
+    // 8 discriminator + 8 tx_index + 1 draft flag = 17 bytes
+    assert_eq!(bytes.len(), 17);
+    // tx_index = 42 in LE
+    let tx_idx = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+    assert_eq!(tx_idx, 42);
+    assert_eq!(bytes[16], 0u8, "draft=false → 0");
+}
+
+// ─── WasmBroadcaster ──────────────────────────────────────────────────────────
+
+#[test]
+fn broadcaster_cluster_name_detection() {
+    let cases = [
+        ("https://api.mainnet-beta.solana.com", "mainnet"),
+        ("https://api.devnet.solana.com", "devnet"),
+        ("https://api.testnet.solana.com", "testnet"),
+        ("http://localhost:8899", "localnet"),
+        ("http://127.0.0.1:8899", "localnet"),
+        ("https://my-custom-rpc.example.com", "custom"),
+    ];
+    for (url, expected) in cases {
+        let bc = WasmBroadcaster::new(url);
+        assert_eq!(bc.cluster_name(), expected, "url={url}");
+    }
+}
+
+#[test]
+fn broadcaster_build_and_parse_balance_flow() {
+    let bc = WasmBroadcaster::new("https://api.devnet.solana.com");
+    let pubkey = "So11111111111111111111111111111111111111112";
+
+    // Build request body
+    let body = bc.build_get_balance_body(pubkey, 1);
+    let v: serde_json::Value = serde_json::from_str(&body).expect("body JSON");
+    assert_eq!(v["method"].as_str().unwrap(), "getBalance");
+    assert_eq!(v["id"].as_u64().unwrap(), 1);
+
+    // Parse a synthetic success response
+    let response = r#"{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":123},"value":5000000}}"#;
+    let lamports = bc.parse_get_balance_response(response).expect("parse");
+    assert_eq!(lamports, 5_000_000);
+}
+
+// NOTE: broadcaster_parse_error_response_propagates is tested in e2e_wasm.rs
+// because error returns invoke JsValue::from_str which panics on non-wasm32.
+
+#[test]
+fn broadcaster_explorer_urls() {
+    let bc_main = WasmBroadcaster::new("https://api.mainnet-beta.solana.com");
+    let sig = "5j7s8TFWnnNsPa5p7jMRcmYXzGQEYrHkXSBFEMJApwHb1234test";
+    let url = bc_main.explorer_url(sig);
+    assert!(url.contains("explorer.solana.com/tx/"), "mainnet URL: {url}");
+    assert!(!url.contains("cluster="), "mainnet URL should not have cluster param: {url}");
+
+    let bc_dev = WasmBroadcaster::new("https://api.devnet.solana.com");
+    let dev_url = bc_dev.explorer_url(sig);
+    assert!(dev_url.contains("cluster=devnet"), "devnet URL: {dev_url}");
+}
+
+#[test]
+fn broadcaster_blockhash_roundtrip() {
+    let bc = WasmBroadcaster::new("https://api.devnet.solana.com");
+    let body = bc.build_get_latest_blockhash_body(3);
+    let v: serde_json::Value = serde_json::from_str(&body).expect("body JSON");
+    assert_eq!(v["method"].as_str().unwrap(), "getLatestBlockhash");
+
+    let mock_resp = r#"{"jsonrpc":"2.0","id":3,"result":{"context":{"slot":100},"value":{"blockhash":"4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi","feeCalculator":{"lamportsPerSignature":5000}}}}"#;
+    let bh = bc.parse_get_latest_blockhash_response(mock_resp).expect("parse");
+    assert_eq!(bh, "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi");
+}
+
+// ─── WasmKeyStore ─────────────────────────────────────────────────────────────
+
+#[test]
+fn keystore_generate_store_load_roundtrip() {
+    let mut ks = WasmKeyStore::new();
+    assert!(ks.is_empty());
+
+    let pubkey = ks.generate("treasury").expect("generate");
+    assert!(!pubkey.is_empty());
+    assert!(ks.exists("treasury"));
+    assert_eq!(ks.len(), 1);
+
+    // load returns 32-byte seed
+    let seed = ks.load("treasury").expect("load");
+    assert_eq!(seed.len(), 32);
+
+    // pubkey_of matches generate's return
+    let pk2 = ks.pubkey_of("treasury").expect("pubkey_of");
+    assert_eq!(pubkey, pk2);
+}
+
+#[test]
+fn keystore_delete_and_exists() {
+    let mut ks = WasmKeyStore::new();
+    ks.generate("alice").expect("generate");
+    ks.generate("bob").expect("generate");
+    assert_eq!(ks.len(), 2);
+
+    let deleted = ks.delete("alice");
+    assert!(deleted, "delete should return true for existing key");
+    assert!(!ks.exists("alice"));
+    assert!(ks.exists("bob"));
+    assert_eq!(ks.len(), 1);
+
+    // Deleting non-existent returns false
+    assert!(!ks.delete("alice"));
+}
+
+#[test]
+fn keystore_export_import_hex_roundtrip() {
+    let mut ks1 = WasmKeyStore::new();
+    let pk1 = ks1.generate("wallet").expect("generate");
+    let hex = ks1.export_hex("wallet").expect("export");
+    assert_eq!(hex.len(), 64, "32 bytes → 64 hex chars");
+
+    let mut ks2 = WasmKeyStore::new();
+    let pk2 = ks2.import_hex("wallet", &hex).expect("import");
+    assert_eq!(pk1, pk2, "import must reproduce same public key");
+
+    // Sign with both and compare signatures
+    let msg = b"cross-session signature test";
+    let sig1 = ks1.sign_with("wallet", msg).expect("sign1");
+    let sig2 = ks2.sign_with("wallet", msg).expect("sign2");
+    assert_eq!(sig1, sig2, "same seed must produce same signature");
+    assert!(WasmKeypair::verify(
+        &ks1.pubkey_bytes_of("wallet").expect("pk bytes"),
+        msg,
+        &sig1
+    ));
+}
+
+#[test]
+fn keystore_list_labels_json() {
+    let mut ks = WasmKeyStore::new();
+    ks.generate("a").expect("a");
+    ks.generate("b").expect("b");
+    ks.generate("c").expect("c");
+
+    let labels_json = ks.list_labels_json();
+    let labels: Vec<String> = serde_json::from_str(&labels_json).expect("parse");
+    assert_eq!(labels.len(), 3);
+    assert!(labels.contains(&"a".to_string()));
+    assert!(labels.contains(&"b".to_string()));
+    assert!(labels.contains(&"c".to_string()));
 }
 
 // ─── sign → verify within AirSign protocol flow ───────────────────────────────
