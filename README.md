@@ -1,5 +1,12 @@
 # AirSign
 
+> [!WARNING]
+> **🚧 ACTIVE DEVELOPMENT — DO NOT USE WITH REAL FUNDS 🚧**
+>
+> AirSign is experimental software under active development. It has **not** received a formal security audit. Known issues exist in the request-response binding, VersionedTransaction support, and broadcast confirmation guarantees (see [`docs/AUDIT_PACKAGE/KNOWN_ISSUES.md`](docs/AUDIT_PACKAGE/KNOWN_ISSUES.md)).
+>
+> **Use devnet or testnet only.** Any SOL or tokens sent through this software on mainnet are at risk of permanent loss. The authors accept no liability for lost funds.
+
 **Air-gapped, fountain-coded, encrypted transaction signing for Solana.**
 
 > **v6.0.0** — Mobile signer app (Expo/React Native), audit package (`docs/AUDIT_PACKAGE/`), CI supply-chain gates (`cargo audit` + `cargo deny`), 158 tests across all crates
