@@ -4,7 +4,7 @@ description = "QR-code generation, animated display, and camera scanning for Aft
 version.workspace     = true
 edition.workspace     = true
 authors.workspace     = true
-license.workspace     = true
+license-file.workspace     = true
 repository.workspace  = true
 
 [features]

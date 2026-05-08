@@ -3,7 +3,7 @@ name        = "afterimage-dkg"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 description = "FROST RFC 9591 Distributed Key Generation (DKG) for AirSign — trustless t-of-n key setup without a trusted dealer"
 

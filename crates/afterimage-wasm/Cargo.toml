@@ -4,7 +4,7 @@ description = "WebAssembly bindings for the AfterImage air-gap protocol"
 version.workspace     = true
 edition.workspace     = true
 authors.workspace     = true
-license.workspace     = true
+license-file.workspace     = true
 repository.workspace  = true
 keywords     = ["wasm", "air-gap", "qr-code", "browser"]
 

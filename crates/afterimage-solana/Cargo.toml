@@ -4,7 +4,7 @@ description = "Air-gap Solana transaction signing via AfterImage QR streams (Air
 version.workspace     = true
 edition.workspace     = true
 authors.workspace     = true
-license.workspace     = true
+license-file.workspace     = true
 repository.workspace  = true
 keywords     = ["solana", "air-gap", "signing", "hardware-wallet", "qr-code"]
 

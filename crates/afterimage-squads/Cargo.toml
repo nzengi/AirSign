@@ -3,7 +3,7 @@ name        = "afterimage-squads"
 version.workspace   = true
 edition.workspace   = true
 authors.workspace   = true
-license.workspace   = true
+license-file.workspace   = true
 repository.workspace = true
 description = "Squads v4 on-chain multisig integration for AirSign — build, propose, approve, and execute Squads vault transactions from an air-gapped workflow"
 
