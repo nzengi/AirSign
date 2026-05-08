@@ -5,9 +5,18 @@
 # add the wasm32-unknown-unknown target, install wasm-pack, build the WASM
 # bindings into apps/signer-web/src/wasm-pkg/ (where signer-web's wasm.ts
 # imports them from), and finally run the existing tsc + vite build.
+#
+# This script is location-aware: it cd's to the repo root regardless of which
+# directory Vercel invokes it from (root or apps/signer-web).
 set -euo pipefail
 
 log() { printf '\n\033[1;36m[vercel-build]\033[0m %s\n' "$*"; }
+
+# ── 0. Locate the repo root and cd there ─────────────────────────────────────
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." &>/dev/null && pwd)"
+cd "$REPO_ROOT"
+log "running from $REPO_ROOT"
 
 # ── 1. Rust toolchain (cached only on warm builds; cold installs ~30 s) ──────
 if ! command -v rustup >/dev/null 2>&1; then
