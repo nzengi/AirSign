@@ -1,0 +1,1075 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AirSign — Solana Cypherpunk Hackathon Pitch</title>
+<meta name="description" content="Air-gapped Solana signing, no hardware required — 10-slide pitch deck." />
+<style>
+/* ─── Tokens ──────────────────────────────────────────────────────────── */
+:root {
+  --bg:        #07080d;
+  --bg-2:      #0b0d14;
+  --surface:   #11141d;
+  --surface-2: #161a26;
+  --border:    #232938;
+  --border-strong: #2c3346;
+  --accent:    #9945ff;
+  --accent2:   #14f195;
+  --accent3:   #00d1ff;
+  --text:      #ecf0f7;
+  --muted:     #8896aa;
+  --danger:    #ef4444;
+  --warn:      #f59e0b;
+  --grad: linear-gradient(135deg, #9945ff 0%, #14f195 100%);
+  --grad-soft: linear-gradient(135deg, rgba(153,69,255,0.18), rgba(20,241,149,0.12));
+  --mono: "JetBrains Mono","Fira Code","Cascadia Code", ui-monospace, monospace;
+}
+
+/* ─── Reset ───────────────────────────────────────────────────────────── */
+*,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 18px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+  background-image:
+    radial-gradient(900px 500px at 8% -10%,  rgba(153,69,255,0.12), transparent 60%),
+    radial-gradient(900px 500px at 92% 100%, rgba(20,241,149,0.08), transparent 60%),
+    radial-gradient(700px 700px at 50% 50%,  rgba(0,209,255,0.04), transparent 70%);
+  background-attachment: fixed;
+}
+
+/* ─── Deck container ──────────────────────────────────────────────────── */
+.deck {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+.slide {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6vh 8vw;
+  opacity: 0;
+  transform: translateX(40px);
+  pointer-events: none;
+  transition: opacity 0.45s cubic-bezier(0.22,1,0.36,1), transform 0.45s cubic-bezier(0.22,1,0.36,1);
+}
+.slide.active {
+  opacity: 1;
+  transform: translateX(0);
+  pointer-events: auto;
+}
+.slide-inner {
+  width: 100%;
+  max-width: 1200px;
+  position: relative;
+}
+
+/* ─── Typography ──────────────────────────────────────────────────────── */
+h1.headline {
+  font-size: clamp(48px, 7.2vw, 92px);
+  font-weight: 900;
+  line-height: 1.05;
+  letter-spacing: -0.025em;
+  margin-bottom: 0.4em;
+}
+h1.headline .grad {
+  background: var(--grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+h2.title {
+  font-size: clamp(34px, 4.6vw, 60px);
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  margin-bottom: 0.6em;
+}
+h2.title .grad {
+  background: var(--grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+h3.kicker {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--accent);
+  margin-bottom: 18px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.kicker-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 12px var(--accent);
+}
+p.lead {
+  font-size: clamp(18px, 1.8vw, 24px);
+  color: var(--muted);
+  line-height: 1.55;
+  max-width: 800px;
+  margin-bottom: 24px;
+}
+p.lead strong { color: var(--text); font-weight: 700; }
+.mono { font-family: var(--mono); }
+
+/* Pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 14px;
+  border-radius: 99px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 22px;
+}
+.pill-cyber {
+  background: rgba(20,241,149,0.10);
+  border: 1px solid rgba(20,241,149,0.40);
+  color: #b4f5d6;
+}
+.pill-cyber .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent2);
+  box-shadow: 0 0 10px var(--accent2);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+.pill-purple {
+  background: rgba(153,69,255,0.10);
+  border: 1px solid rgba(153,69,255,0.40);
+  color: #c9b3ff;
+}
+.pill-mono {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 500;
+}
+@keyframes pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50%      { transform: scale(1.4); opacity: 0.55; }
+}
+
+/* ─── Layout patterns ─────────────────────────────────────────────────── */
+.two-col {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  gap: 6vw;
+  align-items: center;
+}
+.three-col {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+}
+.center { text-align: center; }
+.center .lead { margin-left: auto; margin-right: auto; }
+
+/* Stats */
+.stat-row {
+  display: flex; gap: 36px; flex-wrap: wrap;
+  margin-top: 32px;
+}
+.stat .num {
+  font-family: var(--mono);
+  font-size: clamp(28px, 3.2vw, 44px);
+  font-weight: 700;
+  line-height: 1;
+  background: var(--grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.stat .lab {
+  font-size: 12.5px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-top: 4px;
+}
+
+/* Step boxes (slide 4) */
+.steps {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr auto 1fr;
+  gap: 16px;
+  align-items: center;
+  margin-top: 28px;
+}
+.step {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px;
+  text-align: center;
+}
+.step .icon {
+  width: 48px; height: 48px;
+  border-radius: 12px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 22px;
+  margin-bottom: 10px;
+}
+.step:nth-child(1) .icon { background: rgba(153,69,255,0.18); border: 1px solid rgba(153,69,255,0.45); }
+.step:nth-child(3) .icon { background: rgba(0,209,255,0.14);  border: 1px solid rgba(0,209,255,0.45); }
+.step:nth-child(5) .icon { background: rgba(20,241,149,0.14); border: 1px solid rgba(20,241,149,0.45); }
+.step h4 { font-size: 17px; font-weight: 700; margin-bottom: 4px; }
+.step p { font-size: 13px; color: var(--muted); line-height: 1.55; }
+.step-arrow { font-size: 24px; color: var(--accent); opacity: 0.7; }
+
+/* Crypto-stack list (slide 5) */
+.stack {
+  display: flex; flex-direction: column;
+  gap: 12px;
+  margin-top: 20px;
+}
+.stack-row {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.stack-row .layer {
+  font-family: var(--mono);
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--accent);
+}
+.stack-row .what {
+  font-size: 14.5px;
+  color: var(--text);
+}
+.stack-row .what em {
+  color: var(--muted);
+  font-style: normal;
+  font-size: 13px;
+  margin-left: 8px;
+}
+
+/* Comparison table (slide 6) */
+.cmp {
+  width: 100%;
+  font-size: 14px;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin-top: 20px;
+}
+.cmp thead th {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  padding: 10px 12px;
+  border-bottom: 2px solid var(--border-strong);
+  text-align: center;
+}
+.cmp thead th:first-child { text-align: left; }
+.cmp thead th.us {
+  color: var(--accent2);
+  background: rgba(20,241,149,0.06);
+  border-radius: 8px 8px 0 0;
+}
+.cmp tbody th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text);
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.cmp tbody td {
+  text-align: center;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 13px;
+}
+.cmp tbody td.us {
+  color: var(--accent2);
+  font-weight: 700;
+  background: rgba(20,241,149,0.04);
+}
+.cmp tbody tr:last-child td,
+.cmp tbody tr:last-child th { border-bottom: none; }
+
+/* Cards (slide 8 stats, slide 9 markets) */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 18px;
+  margin-top: 20px;
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 22px;
+}
+.card h4 {
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.card p {
+  font-size: 14px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+.card.bignum .num {
+  font-family: var(--mono);
+  font-size: 36px;
+  font-weight: 800;
+  background: var(--grad);
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+  line-height: 1;
+  margin-bottom: 6px;
+}
+.card.bignum .lab {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* Roadmap timeline (slide 10) */
+.roadmap {
+  display: flex; flex-direction: column;
+  gap: 14px;
+  margin-top: 22px;
+}
+.rmrow {
+  display: grid;
+  grid-template-columns: 100px 24px 1fr;
+  align-items: flex-start;
+  gap: 16px;
+  font-size: 15px;
+}
+.rmrow .when {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding-top: 4px;
+}
+.rmrow .marker {
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  margin-top: 4px;
+  display: inline-block;
+  position: relative;
+}
+.rmrow.done .marker { background: var(--accent2); box-shadow: 0 0 10px rgba(20,241,149,0.5); }
+.rmrow.now  .marker { background: var(--accent);  box-shadow: 0 0 14px rgba(153,69,255,0.55); animation: pulse-mark 1.6s ease-in-out infinite; }
+.rmrow.next .marker { background: transparent; border: 2px solid var(--border-strong); }
+@keyframes pulse-mark {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.18); }
+}
+.rmrow .what  { color: var(--text); font-weight: 600; }
+.rmrow .what em { color: var(--muted); font-style: normal; font-weight: 400; display: block; font-size: 13px; margin-top: 2px; }
+
+/* Final CTA */
+.cta-row {
+  display: flex; gap: 16px; flex-wrap: wrap;
+  margin-top: 32px;
+}
+.btn {
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 14px 26px;
+  border-radius: 12px;
+  font-size: 15px;
+  font-weight: 700;
+  text-decoration: none;
+  transition: transform 0.15s, box-shadow 0.18s;
+}
+.btn-primary { background: var(--grad); color: #0a0a0a; box-shadow: 0 6px 24px rgba(153,69,255,0.4); }
+.btn-primary:hover { transform: translateY(-2px); box-shadow: 0 10px 32px rgba(153,69,255,0.55); }
+.btn-outline {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+}
+.btn-outline:hover { border-color: var(--accent); transform: translateY(-2px); }
+
+/* Bullet list */
+ul.bullets { list-style: none; padding: 0; margin-top: 12px; }
+ul.bullets li {
+  position: relative;
+  padding: 8px 0 8px 28px;
+  font-size: 17px;
+  color: var(--text);
+  line-height: 1.55;
+}
+ul.bullets li::before {
+  content: "→";
+  position: absolute;
+  left: 0; top: 8px;
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 18px;
+}
+ul.bullets.danger li::before { color: var(--danger); }
+ul.bullets li small { color: var(--muted); display: block; margin-top: 2px; font-size: 13px; }
+
+/* Hero visual block (slide 1 + 4) */
+.hero-visual {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  max-width: 380px;
+  margin: 0 auto;
+  border-radius: 22px;
+  background:
+    radial-gradient(ellipse at center, rgba(153,69,255,0.20), transparent 65%),
+    var(--surface);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+}
+.hero-visual::before {
+  content: "";
+  position: absolute; inset: -2px;
+  background: conic-gradient(from 0deg, transparent 0%, rgba(153,69,255,0.5) 25%, transparent 50%, rgba(20,241,149,0.5) 75%, transparent 100%);
+  animation: spin-slow 9s linear infinite;
+  opacity: 0.55;
+  filter: blur(14px);
+  z-index: 0;
+}
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.hero-visual-inner {
+  position: relative; z-index: 1;
+  width: 78%; height: 78%;
+  border-radius: 16px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  display: grid; grid-template-columns: 1fr 1fr;
+  overflow: hidden;
+}
+.hero-half {
+  position: relative;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  padding: 20px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.hero-half:first-child { border-right: 1px dashed var(--border-strong); }
+.hero-half-icon {
+  width: 56px; height: 56px;
+  border-radius: 14px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 26px;
+  margin-bottom: 12px;
+}
+.hero-half:first-child .hero-half-icon { background: rgba(153,69,255,0.18); border: 1px solid rgba(153,69,255,0.45); }
+.hero-half:last-child  .hero-half-icon { background: rgba(20,241,149,0.14); border: 1px solid rgba(20,241,149,0.45); }
+.hero-arrow {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%,-50%);
+  width: 48px; height: 48px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  color: var(--accent2);
+  font-size: 20px;
+  z-index: 2;
+  box-shadow: 0 0 0 4px var(--bg), 0 0 28px rgba(20,241,149,0.55);
+  animation: arrow-pulse 1.8s ease-in-out infinite;
+}
+@keyframes arrow-pulse {
+  0%, 100% { box-shadow: 0 0 0 4px var(--bg), 0 0 18px rgba(20,241,149,0.35); }
+  50%      { box-shadow: 0 0 0 4px var(--bg), 0 0 38px rgba(20,241,149,0.85); }
+}
+
+/* ─── Chrome (slide counter, controls, progress bar) ──────────────────── */
+.chrome {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 24px;
+  background: linear-gradient(0deg, rgba(7,8,13,0.85), transparent);
+  z-index: 100;
+  pointer-events: none;
+}
+.chrome > * { pointer-events: auto; }
+.chrome-left { font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 12px; }
+.chrome-left .brand {
+  font-size: 13px; font-weight: 700;
+  background: var(--grad);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.chrome-counter { font-family: var(--mono); }
+.chrome-controls { display: flex; gap: 6px; }
+.ctrl {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
+  color: var(--text);
+  width: 36px; height: 36px;
+  border-radius: 8px;
+  font-size: 14px;
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: background 0.15s, border-color 0.15s;
+}
+.ctrl:hover { background: rgba(255,255,255,0.08); border-color: var(--accent); }
+.ctrl.active { background: rgba(153,69,255,0.18); border-color: var(--accent); color: var(--accent); }
+
+/* Progress bar (top) */
+.progress-track {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: rgba(255,255,255,0.06);
+  z-index: 100;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--grad);
+  width: 0;
+  transition: width 0.18s linear;
+}
+
+/* Slide-progress dots */
+.dots {
+  position: fixed;
+  top: 14px; left: 50%;
+  transform: translateX(-50%);
+  display: flex; gap: 6px;
+  z-index: 100;
+}
+.dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.10);
+  cursor: pointer;
+  transition: background 0.15s, transform 0.15s;
+}
+.dot:hover { transform: scale(1.3); }
+.dot.active { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+
+/* Slide-internal entrance: stagger children when slide becomes active */
+.slide.active .stagger > * {
+  opacity: 0;
+  transform: translateY(8px);
+  animation: fade-up 0.5s ease-out forwards;
+}
+.slide.active .stagger > *:nth-child(1) { animation-delay: 0.10s; }
+.slide.active .stagger > *:nth-child(2) { animation-delay: 0.18s; }
+.slide.active .stagger > *:nth-child(3) { animation-delay: 0.26s; }
+.slide.active .stagger > *:nth-child(4) { animation-delay: 0.34s; }
+.slide.active .stagger > *:nth-child(5) { animation-delay: 0.42s; }
+.slide.active .stagger > *:nth-child(6) { animation-delay: 0.50s; }
+.slide.active .stagger > *:nth-child(7) { animation-delay: 0.58s; }
+.slide.active .stagger > *:nth-child(8) { animation-delay: 0.66s; }
+@keyframes fade-up {
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Responsive — keep readable on smaller screens */
+@media (max-width: 900px) {
+  .two-col, .three-col, .cards, .steps { grid-template-columns: 1fr; }
+  .step-arrow { display: none; }
+  .stack-row { grid-template-columns: 1fr; gap: 4px; }
+  .cmp { font-size: 12px; }
+  .cmp tbody th, .cmp tbody td { padding: 7px 6px; }
+}
+
+/* Print: each slide on its own page, dark theme preserved on color-printer-friendly print */
+@media print {
+  body { background: #fff; color: #000; }
+  .deck { height: auto; overflow: visible; }
+  .slide {
+    position: static;
+    opacity: 1;
+    transform: none;
+    page-break-after: always;
+    height: 100vh;
+  }
+  .chrome, .progress-track, .dots { display: none; }
+}
+</style>
+</head>
+<body>
+
+<div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+<div class="dots" id="dots"></div>
+
+<div class="deck" id="deck">
+
+<!-- ─── Slide 1 — Title ──────────────────────────────────────────────── -->
+<section class="slide" data-slide="1">
+  <div class="slide-inner two-col">
+    <div class="stagger">
+      <span class="pill pill-cyber">
+        <span class="dot"></span>
+        Solana Cypherpunk · Privacy · Security · Sovereignty
+      </span>
+      <h1 class="headline">
+        Air-gapped Solana signing,<br />
+        <span class="grad">no hardware required.</span>
+      </h1>
+      <p class="lead">
+        AirSign moves your Solana private key onto any device that has
+        <strong>never touched the internet</strong> and signs transactions
+        over an encrypted, fountain-coded QR stream. No USB. No Bluetooth.
+        No network. Just light.
+      </p>
+      <div class="stat-row">
+        <div class="stat"><div class="num">8</div><div class="lab">Rust crates</div></div>
+        <div class="stat"><div class="num">197</div><div class="lab">tests passing</div></div>
+        <div class="stat"><div class="num">0</div><div class="lab">unsafe lines</div></div>
+        <div class="stat"><div class="num">RFC 9591</div><div class="lab">FROST · DKG</div></div>
+      </div>
+    </div>
+    <div class="hero-visual">
+      <div class="hero-visual-inner">
+        <div class="hero-half">
+          <div class="hero-half-icon">📡</div>
+          Online
+        </div>
+        <div class="hero-half">
+          <div class="hero-half-icon">🔐</div>
+          Air-gapped
+        </div>
+        <div class="hero-arrow">⇄</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── Slide 2 — Problem ───────────────────────────────────────────── -->
+<section class="slide" data-slide="2">
+  <div class="slide-inner stagger">
+    <h3 class="kicker"><span class="kicker-dot"></span>Problem</h3>
+    <h2 class="title">
+      Hot wallets are the <span class="grad">single largest attack surface</span> on Solana.
+    </h2>
+    <div class="stat-row" style="margin-bottom: 24px;">
+      <div class="stat"><div class="num">$50M+</div><div class="lab">drained from Solana hot wallets in the last 6 months</div></div>
+    </div>
+    <p class="lead">Every browser extension, every signing dApp, every malicious npm package is a path to your private key. The attack surface widens each time you open a new tab.</p>
+    <ul class="bullets danger">
+      <li>Malicious page silently re-signs a confirmed tx with a different recipient</li>
+      <li>Compromised npm dep ships ed25519 → captures the seed at runtime</li>
+      <li>Phishing clone of a wallet extension UI; user types the seed once, never again</li>
+      <li>Browser-level keylogger steals the password the moment it's typed</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ─── Slide 3 — Why hardware wallets aren't enough ────────────────── -->
+<section class="slide" data-slide="3">
+  <div class="slide-inner stagger">
+    <h3 class="kicker"><span class="kicker-dot"></span>Existing answer · Hardware wallets</h3>
+    <h2 class="title">Better than hot. Still <span class="grad">not enough</span>.</h2>
+    <p class="lead">Hardware wallets put the key in a secure element — but the channel between you and the secure element is still online and bidirectional.</p>
+    <ul class="bullets">
+      <li><strong>USB / Bluetooth attack surface.</strong><small>Recent CVEs in Ledger Live, Trezor Suite, BIP39 implementations.</small></li>
+      <li><strong>Hardware cost: $80 – $300.</strong><small>Vendor lock-in. Battery dependency. Firmware update discipline.</small></li>
+      <li><strong>Blind signing on small screens.</strong><small>Complex Solana txs (Squads votes, DEX routes) don't fit on a Ledger screen.</small></li>
+      <li><strong>Closed firmware.</strong><small>Most "hardware wallet security" claims live in code only the vendor can audit.</small></li>
+    </ul>
+    <p style="margin-top: 24px; font-size: 16px; color: var(--muted);">
+      <strong style="color: var(--text);">Aurora cold wallet</strong> (Breakout 2025) went hardware-only. <strong style="color: var(--text);">Pollinet</strong> (Cypherpunk 2025) went Bluetooth mesh. <strong style="color: var(--text);">Unruggable</strong> (Radar 2024) went MPC. None won a Grand Champion. The space is open.
+    </p>
+  </div>
+</section>
+
+<!-- ─── Slide 4 — AirSign ───────────────────────────────────────────── -->
+<section class="slide" data-slide="4">
+  <div class="slide-inner stagger">
+    <h3 class="kicker"><span class="kicker-dot"></span>The AirSign approach</h3>
+    <h2 class="title">
+      Any device with airplane mode <br />becomes a <span class="grad">cold-storage signer</span>.
+    </h2>
+    <p class="lead">
+      An old laptop. A phone in airplane mode. A Raspberry Pi with no Wi-Fi card. AirSign turns it into the device that holds your private key — and signs transactions over a one-way optical channel.
+    </p>
+    <div class="steps">
+      <div class="step">
+        <div class="icon">📡</div>
+        <h4>1 · Prepare & Send</h4>
+        <p>Online machine encrypts the unsigned tx (Argon2id + ChaCha20-Poly1305) and animates a fountain-coded QR stream.</p>
+      </div>
+      <div class="step-arrow">→</div>
+      <div class="step">
+        <div class="icon">🔐</div>
+        <h4>2 · Air-gap Sign</h4>
+        <p>Offline device scans, decrypts, signs with Ed25519, emits the signed response back as QR.</p>
+      </div>
+      <div class="step-arrow">→</div>
+      <div class="step">
+        <div class="icon">📨</div>
+        <h4>3 · Receive & Broadcast</h4>
+        <p>Online machine reassembles the response and broadcasts to devnet/testnet/mainnet via standard RPC.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── Slide 5 — Cryptographic stack ───────────────────────────────── -->
+<section class="slide" data-slide="5">
+  <div class="slide-inner stagger">
+    <h3 class="kicker"><span class="kicker-dot"></span>Cryptographic stack</h3>
+    <h2 class="title">Every primitive named. <span class="grad">None custom.</span></h2>
+    <p class="lead">
+      Audit-ready. RFC-cited. Constant-time by upstream design. The fountain layer carries no secret material — confidentiality lives in the AEAD layer above it.
+    </p>
+    <div class="stack">
+      <div class="stack-row"><div class="layer">RFC 8032</div><div class="what">Ed25519 signing <em>· Solana-native; FROST output is indistinguishable on chain</em></div></div>
+      <div class="stack-row"><div class="layer">RFC 8439</div><div class="what">ChaCha20-Poly1305 AEAD <em>· per-session 96-bit random nonce; Poly1305 tag rejects tampering</em></div></div>
+      <div class="stack-row"><div class="layer">RFC 9106</div><div class="what">Argon2id KDF <em>· OWASP 2024 minimum (m=64 MiB, t=3, p=1); Mainnet/Paranoid presets</em></div></div>
+      <div class="stack-row"><div class="layer">RFC 9591</div><div class="what">FROST threshold <em>· t-of-n Ed25519, explicit binding, single 64-byte aggregated sig</em></div></div>
+      <div class="stack-row"><div class="layer">Pedersen DKG</div><div class="what">Distributed key generation <em>· no trusted dealer; Schnorr proof-of-knowledge blocks last-participant bias</em></div></div>
+      <div class="stack-row"><div class="layer">LT codes</div><div class="what">Luby Transform fountain coding <em>· survives ~30% frame loss; ChaCha8-seeded RNG for canonical decoding</em></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── Slide 6 — Differentiation ───────────────────────────────────── -->
+<section class="slide" data-slide="6">
+  <div class="slide-inner stagger">
+    <h3 class="kicker"><span class="kicker-dot"></span>vs. existing options</h3>
+    <h2 class="title">First and only <span class="grad">software-defined air-gap</span> with native FROST + DKG + Squads.</h2>
+    <table class="cmp">
+      <thead>
+        <tr>
+          <th>Capability</th>
+          <th>Hot wallet<br /><small style="font-weight:400;color:var(--muted);">Phantom</small></th>
+          <th>HW wallet<br /><small style="font-weight:400;color:var(--muted);">Ledger</small></th>
+          <th>MPC sharding<br /><small style="font-weight:400;color:var(--muted);">Unruggable</small></th>
+          <th>HW air-gap<br /><small style="font-weight:400;color:var(--muted);">Aurora</small></th>
+          <th class="us">AirSign</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><th>Private key fully offline</th><td>✗</td><td>✓</td><td>shards online</td><td>✓</td><td class="us">✓</td></tr>
+        <tr><th>No USB / Bluetooth surface</th><td>—</td><td>✗</td><td>—</td><td>✓</td><td class="us">✓ optical only</td></tr>
+        <tr><th>Zero hardware cost</th><td>✓</td><td>✗ ($79+)</td><td>✓</td><td>✗ (custom HW)</td><td class="us">✓ any device</td></tr>
+        <tr><th>Real M-of-N multisig</th><td>✗</td><td>vendor-dep</td><td>pseudo (MPC)</td><td>✗</td><td class="us">✓ + FROST + Squads</td></tr>
+        <tr><th>Threshold sigs (FROST RFC 9591)</th><td>✗</td><td>✗</td><td>✗</td><td>✗</td><td class="us">✓ only</td></tr>
+        <tr><th>Trustless DKG (Pedersen)</th><td>✗</td><td>✗</td><td>✗</td><td>✗</td><td class="us">✓ only</td></tr>
+        <tr><th>Survives QR frame loss</th><td>—</td><td>—</td><td>—</td><td>retransmits</td><td class="us">✓ LT fountain</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ─── Slide 7 — Demo ─────────────────────────────────────────────── -->
+<section class="slide" data-slide="7">
+  <div class="slide-inner stagger center">
+    <h3 class="kicker"><span class="kicker-dot"></span>Live demo</h3>
+    <h2 class="title">Watch the pipeline run end-to-end <br /><span class="grad">on one screen</span>.</h2>
+    <p class="lead center">
+      Single-device walkthrough — no second device required. Full Send → Sign → Receive runs in ~10 seconds with real WASM cryptography on both sides.
+      The only thing simulated is the optical channel.
+    </p>
+    <div class="cards">
+      <div class="card bignum">
+        <div class="num">~180 ms</div>
+        <div class="lab">end-to-end signing latency for any payload up to 8&nbsp;KiB <small style="display:block;margin-top:4px;color:var(--muted);">(Argon2id-bound — flat in payload size)</small></div>
+      </div>
+      <div class="card bignum">
+        <div class="num">~287 KB</div>
+        <div class="lab">WASM bundle size (gzipped); cold start under 1 second on broadband</div>
+      </div>
+      <div class="card bignum">
+        <div class="num">~10 s</div>
+        <div class="lab">judge-friendly Live Demo from button click to ✓ "broadcast-ready"</div>
+      </div>
+    </div>
+    <p class="lead center" style="margin-top: 28px;">
+      <span class="pill pill-mono">https://airsign.vercel.app/ → ⚡ Live Demo → ▶ Run live demo</span>
+    </p>
+  </div>
+</section>
+
+<!-- ─── Slide 8 — Technical depth ──────────────────────────────────── -->
+<section class="slide" data-slide="8">
+  <div class="slide-inner stagger">
+    <h3 class="kicker"><span class="kicker-dot"></span>Technical depth</h3>
+    <h2 class="title">Built like <span class="grad">infrastructure</span>, not a hackathon demo.</h2>
+    <div class="cards">
+      <div class="card">
+        <h4>Test suite</h4>
+        <p><strong style="color:var(--text);">197 tests passing</strong> across 8 crates · 4 000-iteration fuzz suite · replay/MITM regression · hostile-input ProtocolError coverage · Argon2id parameter assertions.</p>
+      </div>
+      <div class="card">
+        <h4>Memory hygiene</h4>
+        <p>11 explicit <code>Drop</code>/<code>zeroize</code> sites for secret material · <strong style="color:var(--text);">0 unsafe</strong> in production code · 6 of 7 crates set <code>#![forbid(unsafe_code)]</code>.</p>
+      </div>
+      <div class="card">
+        <h4>CI gates</h4>
+        <p><code>cargo fmt</code> · <code>clippy -D warnings</code> · <code>cargo test</code> · <code>cargo audit</code> with documented transitive ignores · <code>cargo deny</code> for licenses + supply chain.</p>
+      </div>
+      <div class="card">
+        <h4>Threat model</h4>
+        <p>Full STRIDE in <code>docs/SECURITY_MODEL.md</code> · 40-question pitch-room Q&amp;A with code pointers · honest residual-risk list · audit package ready.</p>
+      </div>
+      <div class="card">
+        <h4>Distribution</h4>
+        <p>Rust core · WASM browser bindings · <code>@airsign/react</code> SDK · <code>@airsign/wallet-adapter</code> (MWA-compatible) · CLI · Expo mobile scaffold.</p>
+      </div>
+      <div class="card">
+        <h4>Open source</h4>
+        <p>Apache-2.0. Every line on GitHub. Reproducible builds and SRI-pinned releases on the v6.1 roadmap.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── Slide 9 — Market & integration ─────────────────────────────── -->
+<section class="slide" data-slide="9">
+  <div class="slide-inner stagger">
+    <h3 class="kicker"><span class="kicker-dot"></span>Adoption story</h3>
+    <h2 class="title">We don't replace wallets. <br />We <span class="grad">layer underneath</span> them.</h2>
+    <p class="lead">
+      AirSign integrates as a wallet adapter. Existing dApps don't change; users opt into air-gap signing for high-value tx tiers. Distribution rides on Phantom and Squads — no separate app to install.
+    </p>
+    <div class="three-col">
+      <div class="card">
+        <h4>Tier 1 · Institutional custody</h4>
+        <p>Custody platforms (Fireblocks-style) running Squads vaults. AirSign signs every multisig vote on a permanently offline device — no hardware fleet, no vendor lock-in.</p>
+      </div>
+      <div class="card">
+        <h4>Tier 2 · DAO treasuries</h4>
+        <p>Squads v4 vault holders required to attest via AirSign. Treasury voting becomes air-gapped without buying everyone hardware wallets.</p>
+      </div>
+      <div class="card">
+        <h4>Tier 3 · Whales &amp; high-value users</h4>
+        <p>Phantom adds "Sign with AirSign" next to "Sign with Ledger". High-value tx flows through AirSign; daily flows stay in-extension.</p>
+      </div>
+    </div>
+    <p style="margin-top: 28px; font-size: 16px; color: var(--muted);">
+      <strong style="color: var(--text);">Integration cost for Phantom or Squads:</strong> the <code>@airsign/wallet-adapter</code> package — under 200 LoC, MWA-compatible. We ship the adapter; they wire the toggle.
+    </p>
+  </div>
+</section>
+
+<!-- ─── Slide 10 — Roadmap & ask ───────────────────────────────────── -->
+<section class="slide" data-slide="10">
+  <div class="slide-inner stagger">
+    <h3 class="kicker"><span class="kicker-dot"></span>Roadmap &amp; ask</h3>
+    <h2 class="title">Try the demo. <span class="grad">Audit the code.</span> Integrate.</h2>
+    <div class="roadmap">
+      <div class="rmrow done">
+        <div class="when">v6.0 · today</div>
+        <span class="marker"></span>
+        <div class="what">WASM browser demo · CLI · FROST · DKG · Squads adapter · Mobile scaffold<em>197 tests · STRIDE threat model · 40-question Q&amp;A · audit package ready</em></div>
+      </div>
+      <div class="rmrow now">
+        <div class="when">v6.1 · 1 month</div>
+        <span class="marker"></span>
+        <div class="what">Browser-side transaction inspector · SRI-pinned releases · Mobile native parity<em>blocker: solana-sdk WASM size — workaround sub-crate already scoped</em></div>
+      </div>
+      <div class="rmrow next">
+        <div class="when">v6.5 · 3 months</div>
+        <span class="marker"></span>
+        <div class="what">External audit complete · Phantom + Squads integration PRs<em>funded via Solana Foundation grant + Superteam Earn — applications submitted</em></div>
+      </div>
+      <div class="rmrow next">
+        <div class="when">v7.0 · 6 months</div>
+        <span class="marker"></span>
+        <div class="what">2–3 production deployments · published case studies · post-audit signed releases</div>
+      </div>
+    </div>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="https://airsign.vercel.app/" target="_blank" rel="noopener">▶  Try the live demo</a>
+      <a class="btn btn-outline" href="https://github.com/nzengi/AirSign" target="_blank" rel="noopener">📖  Read the audit package</a>
+    </div>
+    <p style="margin-top: 36px; font-size: 14px; color: var(--muted);">
+      AirSign · Apache-2.0 · Built solo by <strong style="color:var(--text);">@nzengi</strong> for the Solana Cypherpunk Hackathon · No tokens · No fundraise · Just infrastructure.
+    </p>
+  </div>
+</section>
+
+</div>
+
+<!-- Chrome (counter, controls) -->
+<div class="chrome">
+  <div class="chrome-left">
+    <span class="brand">🔐 AirSign</span>
+    <span>·</span>
+    <span class="chrome-counter"><span id="counter">1</span> / 10</span>
+    <span>·</span>
+    <span style="font-size:11px;">←/→ navigate · Space play/pause · F fullscreen · P print</span>
+  </div>
+  <div class="chrome-controls">
+    <button class="ctrl" id="prev"  title="Previous slide (←)">‹</button>
+    <button class="ctrl" id="play"  title="Auto-advance (Space)">▶</button>
+    <button class="ctrl" id="next"  title="Next slide (→)">›</button>
+    <button class="ctrl" id="fs"    title="Fullscreen (F)">⤢</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  const slides = Array.from(document.querySelectorAll(".slide"));
+  const total = slides.length;
+  const counter = document.getElementById("counter");
+  const progressFill = document.getElementById("progressFill");
+  const dotsBox = document.getElementById("dots");
+  const playBtn = document.getElementById("play");
+
+  // Build dot indicators
+  for (let i = 0; i < total; i++) {
+    const d = document.createElement("span");
+    d.className = "dot";
+    d.dataset.idx = String(i);
+    d.title = "Slide " + (i + 1);
+    d.addEventListener("click", () => go(i));
+    dotsBox.appendChild(d);
+  }
+  const dots = Array.from(dotsBox.children);
+
+  let idx = 0;
+  let auto = false;
+  let timer = null;
+  const SLIDE_MS = 9_000; // 9 s per slide when auto-advancing
+
+  function update() {
+    slides.forEach((s, i) => s.classList.toggle("active", i === idx));
+    dots.forEach((d, i) => d.classList.toggle("active", i === idx));
+    counter.textContent = String(idx + 1);
+    progressFill.style.width = ((idx + 1) / total * 100) + "%";
+  }
+
+  function go(n) {
+    if (n < 0) n = total - 1;
+    if (n >= total) n = 0;
+    idx = n;
+    update();
+  }
+
+  function next() { go(idx + 1); }
+  function prev() { go(idx - 1); }
+
+  function toggleAuto() {
+    auto = !auto;
+    playBtn.textContent = auto ? "⏸" : "▶";
+    playBtn.classList.toggle("active", auto);
+    playBtn.title = auto ? "Pause auto-advance (Space)" : "Auto-advance (Space)";
+    if (timer) clearInterval(timer);
+    if (auto) {
+      timer = setInterval(() => {
+        // Loop forever during auto-presentation
+        go(idx + 1 >= total ? 0 : idx + 1);
+      }, SLIDE_MS);
+    }
+  }
+
+  // Buttons
+  document.getElementById("prev").addEventListener("click", prev);
+  document.getElementById("next").addEventListener("click", next);
+  playBtn.addEventListener("click", toggleAuto);
+  document.getElementById("fs").addEventListener("click", () => {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+    else document.exitFullscreen?.();
+  });
+
+  // Keyboard nav
+  window.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+    switch (e.key) {
+      case "ArrowRight":
+      case "PageDown":
+        e.preventDefault(); next(); break;
+      case "ArrowLeft":
+      case "PageUp":
+        e.preventDefault(); prev(); break;
+      case " ":
+      case "Spacebar":
+        e.preventDefault(); toggleAuto(); break;
+      case "Home":
+        e.preventDefault(); go(0); break;
+      case "End":
+        e.preventDefault(); go(total - 1); break;
+      case "f":
+      case "F":
+        if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+        else document.exitFullscreen?.();
+        break;
+      case "p":
+      case "P":
+        window.print();
+        break;
+      case "Escape":
+        if (auto) toggleAuto();
+        break;
+      default:
+        // Number keys jump directly to a slide
+        if (/^[1-9]$/.test(e.key)) go(Number(e.key) - 1);
+        if (e.key === "0") go(9);
+    }
+  });
+
+  // Click anywhere outside the chrome to advance (presentation-style)
+  document.addEventListener("click", (e) => {
+    if (e.target.closest(".chrome") || e.target.closest(".dot") || e.target.closest("a")) return;
+    next();
+  });
+
+  // Touch swipes for mobile
+  let touchStartX = 0;
+  document.addEventListener("touchstart", (e) => {
+    touchStartX = e.changedTouches[0].screenX;
+  }, { passive: true });
+  document.addEventListener("touchend", (e) => {
+    const dx = e.changedTouches[0].screenX - touchStartX;
+    if (Math.abs(dx) < 50) return;
+    if (dx < 0) next(); else prev();
+  });
+
+  // Initial state
+  update();
+
+  // Hash routing — link to specific slides like /pitch-deck.html#5
+  function applyHash() {
+    const m = /^#(\d+)$/.exec(location.hash);
+    if (m) {
+      const n = parseInt(m[1], 10) - 1;
+      if (n >= 0 && n < total) go(n);
+    }
+  }
+  applyHash();
+  window.addEventListener("hashchange", applyHash);
+})();
+</script>
+
+</body>
+</html>

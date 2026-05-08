@@ -1,0 +1,216 @@
+AIRSIGN PROPRIETARY LICENSE
+All Rights Reserved.
+
+Copyright (c) 2024-2026 nzengi. All rights reserved.
+
+THIS IS A PROPRIETARY, CLOSED-SOURCE LICENSE. THIS IS NOT AN OPEN-SOURCE
+LICENSE. NO RIGHTS ARE GRANTED EXCEPT THOSE EXPRESSLY STATED BELOW.
+
+================================================================================
+1. DEFINITIONS
+================================================================================
+
+"Software" means the AirSign / AfterImage source code, object code, binaries,
+compiled artifacts (including WebAssembly modules), documentation, configuration
+files, build scripts, designs, specifications, protocols, schemas, test
+vectors, and any other materials contained in this repository or any
+distribution thereof, in whole or in part, in any form, including any
+modifications, enhancements, derivatives, ports, translations, or future
+versions.
+
+"Licensor" means nzengi, the sole copyright holder of the Software.
+
+"You" or "Licensee" means the natural or legal person accessing, viewing,
+downloading, cloning, forking, mirroring, or otherwise interacting with the
+Software in any manner.
+
+"Commercial Use" means any use, internal or external, that is intended for or
+directed toward commercial advantage, monetary compensation, business
+operation, revenue generation, cost reduction, or any other form of economic
+benefit, whether direct or indirect, and whether realized or merely
+anticipated. This includes, without limitation, use within a for-profit
+entity, use to provide paid or unpaid services to third parties, use in any
+product or service that is sold, licensed, hosted, distributed, or made
+available to others, and use in any business, consulting, contracting,
+freelance, or revenue-generating activity.
+
+================================================================================
+2. NO LICENSE GRANTED
+================================================================================
+
+NO LICENSE, EXPRESS OR IMPLIED, BY ESTOPPEL OR OTHERWISE, TO ANY
+INTELLECTUAL PROPERTY RIGHTS IS GRANTED BY THIS DOCUMENT.
+
+The Software is made viewable solely for the purpose of public-record
+disclosure of the Licensor's authorship and prior art. Mere visibility on a
+public hosting platform (such as GitHub) does NOT constitute a grant of any
+right to use, copy, modify, or distribute the Software.
+
+================================================================================
+3. PROHIBITED ACTS
+================================================================================
+
+Without prior, separate, signed, written authorization from the Licensor, You
+are STRICTLY PROHIBITED from doing any of the following, in whole or in part:
+
+  (a) Copying, reproducing, duplicating, mirroring, archiving, or storing the
+      Software, except for a single ephemeral copy strictly necessary to
+      view the public repository in a web browser;
+
+  (b) Cloning, forking, branching, downloading, exporting, or otherwise
+      obtaining a local copy of the Software, except where such operation is
+      automatically and transiently performed by a standards-compliant web
+      browser solely for human viewing;
+
+  (c) Using the Software, in source or compiled form, in any program,
+      product, service, library, application, deployment, pipeline, build
+      system, training corpus, machine-learning model, dataset, or
+      development workflow;
+
+  (d) Modifying, adapting, translating, porting, refactoring, rewriting, or
+      creating derivative works based upon the Software;
+
+  (e) Distributing, publishing, transmitting, sublicensing, leasing, lending,
+      renting, selling, reselling, assigning, or otherwise making the
+      Software, or any portion thereof, available to any third party;
+
+  (f) Engaging in any Commercial Use of the Software, in any form, by any
+      means, in any jurisdiction, whether for profit or not-for-profit;
+
+  (g) Reverse engineering, decompiling, disassembling, or attempting to
+      derive the source code, algorithms, file formats, wire protocols, or
+      cryptographic constructions from any compiled or binary form of the
+      Software, except to the minimum extent such activity is expressly
+      permitted by mandatory applicable law and cannot be lawfully waived;
+
+  (h) Removing, altering, obscuring, or concealing any copyright notice,
+      trademark notice, attribution, watermark, license notice, or other
+      proprietary marking contained in the Software;
+
+  (i) Using the name "AirSign", "AfterImage", "nzengi", or any confusingly
+      similar mark, in connection with any product, service, fork, or
+      distribution, except for accurate factual reference to the Software;
+
+  (j) Submitting, ingesting, embedding, or training any artificial
+      intelligence model, large language model, code-completion model,
+      retrieval system, or similar tool on the Software or any portion
+      thereof;
+
+  (k) Using the Software in connection with the development, training,
+      evaluation, or operation of any product or service that competes with,
+      or could reasonably be expected to compete with, the Software or any
+      product or service offered by the Licensor;
+
+  (l) Circumventing, disabling, or interfering with any technical measure
+      that controls access to or use of the Software.
+
+================================================================================
+4. NO PATENT, NO TRADEMARK, NO IMPLIED LICENSE
+================================================================================
+
+No patent rights, no trademark rights, no trade-secret rights, no design
+rights, no database rights, and no other intellectual-property rights of any
+kind are granted by this License, by implication, by exhaustion, by waiver,
+by estoppel, or otherwise. All such rights are expressly RESERVED by the
+Licensor.
+
+================================================================================
+5. CONFIDENTIALITY
+================================================================================
+
+To the extent any portion of the Software is provided to You under
+non-public circumstances, You shall treat the Software as the confidential
+and proprietary information of the Licensor, shall not disclose it to any
+third party, and shall protect it with at least the same degree of care You
+use to protect Your own most sensitive trade secrets, but in no event less
+than a reasonable standard of care.
+
+================================================================================
+6. TERMINATION
+================================================================================
+
+Any breach of this License, however minor, automatically and immediately
+terminates all rights (if any) granted to You hereunder, without notice and
+without prejudice to any other remedy available to the Licensor at law or in
+equity. Upon termination, You shall immediately cease all use of the
+Software, permanently delete every copy of the Software in Your possession
+or control, and certify such deletion in writing upon the Licensor's
+request. Sections 3, 4, 5, 7, 8, 9, 10, and 11 survive termination.
+
+================================================================================
+7. ENFORCEMENT, INJUNCTIVE RELIEF, AND DAMAGES
+================================================================================
+
+You acknowledge that any breach of this License will cause irreparable harm
+to the Licensor for which monetary damages would be an inadequate remedy.
+Accordingly, the Licensor shall be entitled to immediate injunctive and
+equitable relief, without bond and without the need to prove actual damages,
+in addition to any other remedies available at law or in equity, including
+the recovery of statutory damages, actual damages, the Licensor's lost
+profits, the unjust enrichment of the infringer, attorneys' fees, and costs
+of enforcement.
+
+================================================================================
+8. NO WARRANTY
+================================================================================
+
+THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF ANY
+KIND, WHETHER EXPRESS, IMPLIED, STATUTORY, OR OTHERWISE, INCLUDING BUT NOT
+LIMITED TO ANY WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE, TITLE, NON-INFRINGEMENT, ACCURACY, RELIABILITY, SECURITY,
+AVAILABILITY, OR THAT THE SOFTWARE WILL OPERATE UNINTERRUPTED OR ERROR-FREE.
+YOUR ACCESS TO AND VIEWING OF THE SOFTWARE IS ENTIRELY AT YOUR OWN RISK.
+
+================================================================================
+9. LIMITATION OF LIABILITY
+================================================================================
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE
+LICENSOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+CONSEQUENTIAL, EXEMPLARY, OR PUNITIVE DAMAGES, INCLUDING BUT NOT LIMITED TO
+LOSS OF PROFITS, REVENUE, DATA, GOODWILL, USE, OR OTHER INTANGIBLE LOSSES,
+ARISING OUT OF OR IN CONNECTION WITH THIS LICENSE OR THE SOFTWARE,
+REGARDLESS OF THE LEGAL THEORY (CONTRACT, TORT, STRICT LIABILITY, OR
+OTHERWISE), AND EVEN IF THE LICENSOR HAS BEEN ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGES.
+
+================================================================================
+10. GOVERNING LAW AND JURISDICTION
+================================================================================
+
+This License shall be governed by, and construed in accordance with, the
+laws of the Republic of Türkiye, without regard to its conflict-of-laws
+rules. The Istanbul Central (Çağlayan) Courts and Enforcement Offices shall
+have exclusive jurisdiction over any dispute, controversy, or claim arising
+out of or relating to this License or the Software. The United Nations
+Convention on Contracts for the International Sale of Goods does not apply.
+
+================================================================================
+11. MISCELLANEOUS
+================================================================================
+
+This License constitutes the entire agreement between You and the Licensor
+with respect to the Software and supersedes all prior or contemporaneous
+understandings. No waiver of any provision of this License shall be
+effective unless in writing and signed by the Licensor. If any provision is
+held unenforceable, the remaining provisions shall remain in full force and
+effect, and the unenforceable provision shall be reformed only to the extent
+necessary to make it enforceable while preserving the Licensor's intent. The
+Licensor's failure to enforce any provision shall not be deemed a waiver of
+future enforcement. You may not assign this License, by operation of law or
+otherwise, without the Licensor's prior written consent. Headings are for
+convenience only.
+
+================================================================================
+12. CONTACT FOR LICENSING INQUIRIES
+================================================================================
+
+All requests for a separate, paid commercial license, OEM license, or
+private redistribution agreement must be directed to the Licensor in
+writing. No commercial right exists until a signed written agreement is in
+place. Until then, ALL RIGHTS ARE RESERVED.
+
+
+================================================================================
+END OF LICENSE
+================================================================================

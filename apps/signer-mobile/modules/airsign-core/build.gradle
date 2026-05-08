@@ -1,0 +1,66 @@
+// build.gradle — Android native module for AirSignCore (v2 WKWebView bridge).
+//
+// v2: AirSignCoreModule.kt loads airsign_bridge.html in a headless WebView.
+//     The bridge HTML fetches the pre-built afterimage-wasm binary from
+//     file:///android_asset/airsign_core/ at runtime.
+//
+// Asset layout (merged into APK assets by the copyAirSignAssets task below):
+//   assets/airsign_core/airsign_bridge.html
+//   assets/airsign_core/wasm/afterimage_wasm.js
+//   assets/airsign_core/wasm/afterimage_wasm_bg.wasm
+
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+apply plugin: 'expo-module'
+
+android {
+  namespace 'expo.modules.airsigncore'
+  compileSdkVersion safeExtGet("compileSdkVersion", 34)
+  defaultConfig {
+    minSdkVersion safeExtGet("minSdkVersion", 24)
+    targetSdkVersion safeExtGet("targetSdkVersion", 34)
+  }
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_11
+    targetCompatibility JavaVersion.VERSION_11
+  }
+  kotlinOptions {
+    jvmTarget = '11'
+  }
+
+  // Register the generated assets directory so the Android build system
+  // packages the bridge HTML and WASM binary into the APK's assets/ folder.
+  sourceSets {
+    main {
+      assets.srcDirs += ["${buildDir}/generated/airsign_assets"]
+    }
+  }
+}
+
+// ── Copy bridge assets into the Android assets source set ────────────────────
+//
+// Source: modules/airsign-core/assets/
+// Dest:   build/generated/airsign_assets/airsign_core/
+//
+// The WebView loads: file:///android_asset/airsign_core/airsign_bridge.html
+// The bridge HTML references: ./wasm/afterimage_wasm.js (relative URL)
+task copyAirSignAssets(type: Copy) {
+  from   "${projectDir}/assets"
+  into   "${buildDir}/generated/airsign_assets/airsign_core"
+  // Preserve the wasm/ sub-directory structure.
+  includeEmptyDirs = false
+}
+
+// Ensure assets are copied before the merge step.
+afterEvaluate {
+  android.libraryVariants.all { variant ->
+    def capitalised = variant.name.capitalize()
+    def mergeTask  = tasks.findByName("merge${capitalised}Assets")
+    if (mergeTask) mergeTask.dependsOn copyAirSignAssets
+  }
+}
+
+dependencies {
+  implementation project(':expo-modules-core')
+  implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8:${safeExtGet('kotlinVersion', '1.9.0')}"
+}

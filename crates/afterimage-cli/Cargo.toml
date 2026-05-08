@@ -1,0 +1,30 @@
+[package]
+name        = "airsign"
+description = "Air-gapped Solana transaction signing and file transfer via QR codes — CLI"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+
+[[bin]]
+name = "airsign"
+path = "src/main.rs"
+
+[dependencies]
+afterimage-core    = { workspace = true }
+afterimage-optical = { workspace = true }
+afterimage-solana  = { path = "../afterimage-solana" }
+afterimage-squads  = { workspace = true }
+
+clap        = { workspace = true }
+rpassword   = { workspace = true }
+indicatif   = { workspace = true }
+serde_json  = { workspace = true }
+solana-sdk  = { workspace = true }
+bincode     = { workspace = true }
+
+[features]
+default = ["display", "camera"]
+display = ["afterimage-optical/display"]
+camera  = ["afterimage-optical/camera"]

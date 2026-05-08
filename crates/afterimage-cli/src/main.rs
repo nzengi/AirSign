@@ -1,0 +1,2415 @@
+//! afterimage / airsign — CLI binary
+//! ===================================
+//! Air-gap file transfer and Solana transaction signing via animated QR codes.
+//!
+//! ## Sub-commands
+//!
+//! ```text
+//! airsign send      <FILE>  [--fps N] [--window-size PX]
+//! airsign recv      <OUTPUT> [--camera-index N]
+//! airsign bench     <FILE>
+//! airsign sign      <REQUEST_FILE> --keypair <PATH|keychain:LABEL|ledger:PATH> [--output PATH] [--yes]
+//! airsign inspect   <TX_FILE|REQUEST_FILE> [--cluster devnet|mainnet] [--simulate]
+//! airsign prepare   transfer | token-transfer | stake-withdraw
+//! airsign broadcast <RESPONSE_FILE> [--cluster devnet|mainnet|testnet]
+//! airsign airdrop   --to <PUBKEY> [--amount SOL] [--cluster devnet|testnet]
+//! airsign run       --keypair <PATH> --to <PUBKEY> --amount <SOL> [--cluster devnet]
+//! airsign key       generate | import | show | list | export | delete
+//! airsign ledger    list | pubkey | version
+//! ```
+
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
+use indicatif::{ProgressBar, ProgressStyle};
+
+use afterimage_core::{
+    crypto::{Argon2Params, SecurityProfile},
+    session::{RecvSession, SendSession},
+};
+use solana_sdk::signature::Signer as _;
+use afterimage_solana::{
+    broadcaster::Broadcaster,
+    inspector::TransactionInspector,
+    keystore::KeyStore,
+    ledger::LedgerSigner,
+    ledger_apdu::DerivationPath,
+    preflight::{PreflightChecker, resolve_cluster_url},
+    signer::{AirSigner, summarize_request, default_nonce_store_path},
+    wallet::WatchWallet,
+    SignRequest,
+    MultiSignRequest, MultiSignResponse, MultiSigner,
+    build_multisig_session, advance_round_from,
+};
+
+// ─── CLI definition ───────────────────────────────────────────────────────────
+
+#[derive(Parser)]
+#[command(
+    name  = "airsign",
+    about = "Air-gapped Solana transaction signing and file transfer via QR codes",
+    version,
+    propagate_version = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Encrypt a file and transmit it as an animated QR stream.
+    Send {
+        /// File to transmit.
+        file: PathBuf,
+
+        /// Frames per second (default: 6).
+        #[arg(long, default_value_t = 6)]
+        fps: u32,
+
+        /// Display window edge size in pixels (default: 600).
+        #[arg(long, default_value_t = 600)]
+        window_size: usize,
+
+        /// Password (prompted securely if omitted).
+        #[arg(long, env = "AFTERIMAGE_PASSWORD")]
+        password: Option<String>,
+
+        /// Named security preset: owasp-2024 | mainnet | paranoid.
+        ///
+        /// Selects pre-tuned Argon2id parameters:
+        ///   owasp-2024  — 64 MiB / t=3  (OWASP 2024 minimum, default)
+        ///   mainnet     — 256 MiB / t=4  (recommended for mainnet-beta)
+        ///   paranoid    — 512 MiB / t=5  (maximum practical hardening)
+        ///
+        /// Cannot be combined with --argon2-mem / --argon2-iter.
+        #[arg(long, value_name = "PROFILE", conflicts_with_all = &["argon2_mem", "argon2_iter"])]
+        security_profile: Option<String>,
+
+        /// Argon2id memory cost in KiB (default: 65536 = 64 MiB, OWASP 2024 minimum).
+        /// Higher values are slower but harder to brute-force.
+        /// Must match the value used on the receiving side (embedded in the v3 frame
+        /// automatically — the receiver reads it back without extra flags).
+        #[arg(long, default_value_t = 65_536, value_name = "KiB")]
+        argon2_mem: u32,
+
+        /// Argon2id iteration (time) cost (default: 3).
+        /// Higher values are slower but harder to brute-force.
+        #[arg(long, default_value_t = 3, value_name = "N")]
+        argon2_iter: u32,
+    },
+
+    /// Receive and decrypt a file from the camera QR stream.
+    Recv {
+        /// Output file path.
+        output: PathBuf,
+
+        /// Camera device index (default: 0).
+        #[arg(long, default_value_t = 0)]
+        camera_index: u32,
+
+        /// Password (prompted securely if omitted).
+        #[arg(long, env = "AFTERIMAGE_PASSWORD")]
+        password: Option<String>,
+    },
+
+    /// Offline encode + decode benchmark (no camera/display required).
+    Bench {
+        /// File to benchmark.
+        file: PathBuf,
+
+        /// Password (default: "benchmark").
+        #[arg(long, default_value = "benchmark")]
+        password: String,
+    },
+
+    /// Sign a SignRequest JSON file with an air-gapped keypair.
+    ///
+    /// Reads a decrypted SignRequest JSON file (produced by `airsign recv`),
+    /// displays a full transaction summary, prompts for confirmation, and
+    /// writes a SignResponse JSON file ready for `airsign send`.
+    ///
+    /// Keypair format: the standard Solana JSON keypair file
+    /// (`~/.config/solana/id.json`) — a JSON array of 64 bytes.
+    Sign {
+        /// Path to the decrypted SignRequest JSON file.
+        #[arg(value_name = "REQUEST_FILE")]
+        request_file: PathBuf,
+
+        /// Path to the Solana keypair JSON file (64-byte array), a keychain
+        /// label prefixed with `keychain:` (e.g. `keychain:my-key`), or a
+        /// Ledger BIP44 path prefixed with `ledger:` (e.g.
+        /// `ledger:m/44'/501'/0'/0'` — uses the default path if omitted:
+        /// `ledger:default`).
+        #[arg(long, value_name = "PATH|keychain:LABEL|ledger:PATH", env = "AIRSIGN_KEYPAIR")]
+        keypair: String,
+
+        /// Output file path for the SignResponse JSON.
+        #[arg(long, value_name = "PATH", default_value = "sign_response.json")]
+        output: PathBuf,
+
+        /// Path to the nonce store (default: ~/.airsign/seen_nonces.json).
+        /// Pass an empty string to disable nonce tracking.
+        #[arg(long, value_name = "PATH")]
+        nonce_store: Option<PathBuf>,
+
+        /// Disable persistent nonce tracking entirely (not recommended).
+        #[arg(long)]
+        no_nonce_store: bool,
+
+        /// Skip the interactive confirmation prompt (for scripted use).
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// OS-native keychain key management (generate, import, show, list, export, delete).
+    #[command(subcommand)]
+    Key(KeyCommands),
+
+    /// Ledger hardware wallet commands (list, pubkey, version).
+    #[command(subcommand)]
+    Ledger(LedgerCommands),
+
+    /// M-of-N multi-signature session management.
+    ///
+    /// Three sub-operations are provided:
+    ///
+    /// `init`  — online machine: create a round-1 MultiSignRequest from an
+    ///           unsigned transaction binary.
+    ///
+    /// `sign`  — air-gapped machine: load a MultiSignRequest JSON, sign it,
+    ///           write a MultiSignResponse JSON.
+    ///
+    /// `next`  — online machine: advance to the next round by combining
+    ///           a MultiSignResponse with the original MultiSignRequest.
+    #[command(subcommand)]
+    Multisign(MultisignCommands),
+
+    /// Inspect a transaction file and display a human-readable summary with risk flags.
+    ///
+    /// Accepts either a raw bincode Transaction (`.bin`), a SignRequest JSON
+    /// (`.json`), or a MultiSignRequest JSON.  Optionally runs an RPC
+    /// simulation against the specified cluster.
+    ///
+    /// ## Examples
+    ///
+    /// ```text
+    /// airsign inspect unsigned_tx.bin
+    /// airsign inspect sign_request.json --cluster devnet --simulate
+    /// ```
+    Inspect {
+        /// Path to a bincode Transaction, SignRequest JSON, or MultiSignRequest JSON.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+
+        /// Solana cluster for fee estimation and simulation (devnet | mainnet | testnet | URL).
+        /// If omitted, only static analysis is performed.
+        #[arg(long, value_name = "CLUSTER")]
+        cluster: Option<String>,
+
+        /// Run RPC simulation against the cluster and display the result.
+        /// Requires --cluster.
+        #[arg(long, requires = "cluster")]
+        simulate: bool,
+    },
+
+    /// Build an unsigned transaction and write it to a file for AirSign QR transmission.
+    ///
+    /// Three sub-operations are provided:
+    ///
+    /// `transfer`       — SOL transfer from the fee-payer to a recipient.
+    ///
+    /// `token-transfer` — SPL Token `TransferChecked` from a source ATA to a
+    ///                    destination ATA.
+    ///
+    /// `stake-withdraw` — Stake account withdrawal to a recipient address.
+    ///
+    /// After generating the unsigned transaction, pipe it through
+    /// `airsign inspect` or `airsign send`.
+    ///
+    /// ## Examples
+    ///
+    /// ```text
+    /// airsign prepare transfer --from 4wTQ… --to 9xRz… --amount 1.5 --cluster devnet
+    /// airsign prepare token-transfer --from 4wTQ… --mint EPjF… --to 9xRz… --amount 100 --decimals 6
+    /// airsign prepare stake-withdraw --stake-account 3kZj… --to 4wTQ… --amount 5.0 --cluster mainnet
+    /// ```
+    #[command(subcommand)]
+    Prepare(PrepareCommands),
+
+    /// Broadcast a signed-transaction file (SignResponse JSON) to a Solana cluster.
+    Broadcast {
+        /// Path to the SignResponse JSON file produced by the air-gapped machine.
+        #[arg(value_name = "RESPONSE_FILE")]
+        response_file: PathBuf,
+
+        /// Solana cluster URL or shorthand: devnet | mainnet | testnet.
+        #[arg(long, default_value = "devnet")]
+        cluster: String,
+    },
+
+    /// Request a devnet / testnet SOL airdrop from the public faucet.
+    ///
+    /// Only works on devnet and testnet — mainnet airdrops are blocked.
+    ///
+    /// ## Example
+    ///
+    /// ```text
+    /// airsign airdrop --to 4wTQ… --amount 2
+    /// airsign airdrop --to 4wTQ… --cluster testnet
+    /// ```
+    Airdrop {
+        /// Recipient public key (base58).  Required.
+        #[arg(long, value_name = "PUBKEY")]
+        to: String,
+
+        /// Amount in SOL (default: 1.0).
+        #[arg(long, default_value_t = 1.0, value_name = "SOL")]
+        amount: f64,
+
+        /// Cluster: devnet (default) or testnet.  Mainnet is rejected.
+        #[arg(long, default_value = "devnet")]
+        cluster: String,
+    },
+
+    /// End-to-end demo pipeline: build transfer tx → sign with keypair → broadcast.
+    ///
+    /// Loads a Solana keypair file (64-byte JSON array, Solana CLI format),
+    /// builds a SOL system-transfer transaction, signs it locally, and submits
+    /// it to the specified cluster — all without leaving the terminal.
+    ///
+    /// ## Example
+    ///
+    /// ```text
+    /// airsign run --keypair ~/.config/solana/id.json --to 4wTQ… --amount 0.01
+    /// airsign run --keypair id.json --to 4wTQ… --amount 0.001 --cluster testnet
+    /// ```
+    Run {
+        /// Path to the Solana keypair JSON file (64-byte array).
+        #[arg(long, value_name = "PATH")]
+        keypair: PathBuf,
+
+        /// Recipient public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        to: String,
+
+        /// Amount in SOL (e.g. 0.01).  Converted to lamports automatically.
+        #[arg(long, value_name = "SOL")]
+        amount: f64,
+
+        /// Solana cluster: devnet | mainnet | testnet | <URL>.
+        #[arg(long, default_value = "devnet")]
+        cluster: String,
+    },
+
+    /// Squads v4 multisig helpers — build instructions offline, sign via AirSign QR.
+    ///
+    /// All sub-commands output JSON to stdout (pipe to a file or `airsign send`).
+    ///
+    /// ## Examples
+    ///
+    /// ```text
+    /// airsign squads pda  --create-key 4wTQ…
+    /// airsign squads create --create-key 4wTQ… --members Alice,Bob,Carol --threshold 2
+    /// airsign squads approve --multisig SQDS… --tx-index 7 --approver Alice…
+    /// airsign squads propose --multisig SQDS… --creator Alice… --tx-index 1 --message <B64>
+    /// airsign squads add-member --multisig SQDS… --creator Alice… --tx-index 5 --member Carol…
+    /// airsign squads change-threshold --multisig SQDS… --creator Alice… --tx-index 6 --threshold 3
+    /// ```
+    #[command(subcommand)]
+    Squads(SquadsCommands),
+
+    /// Verify the current device is properly air-gapped (no active network).
+    ///
+    /// Brutal Q1: "What stops me from running malware on the laptop the user
+    /// reused that has Wi-Fi turned off but never had the radio physically
+    /// disabled?" — this command surfaces exactly which radios and interfaces
+    /// are still capable of joining a network, so the air-gap operator can
+    /// remediate before signing anything sensitive.
+    ///
+    /// Checks performed (Linux/macOS, best-effort):
+    ///
+    /// - Lists every up/non-loopback network interface
+    /// - Checks the default route for any non-loopback gateway
+    /// - On Linux: queries `rfkill` for un-blocked Wi-Fi/Bluetooth radios
+    /// - On macOS: queries `networksetup` for active Wi-Fi/Ethernet services
+    ///
+    /// Exits with status 0 when no active networking is detected, 1 otherwise.
+    /// Pair this with the `--strict` flag in scripts to fail-fast before
+    /// running `airsign sign`.
+    AirgapCheck {
+        /// Exit non-zero on the first finding instead of printing the full report.
+        #[arg(long)]
+        strict: bool,
+
+        /// Output as JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+// ─── Entry point ─────────────────────────────────────────────────────────────
+
+fn main() {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Send {
+            file,
+            fps,
+            window_size,
+            password,
+            security_profile,
+            argon2_mem,
+            argon2_iter,
+        } => cmd_send(file, fps, window_size, password, security_profile, argon2_mem, argon2_iter),
+
+        Commands::Recv {
+            output,
+            camera_index,
+            password,
+        } => cmd_recv(output, camera_index, password),
+
+        Commands::Bench { file, password } => cmd_bench(file, password),
+
+        Commands::Sign {
+            request_file,
+            keypair,
+            output,
+            nonce_store,
+            no_nonce_store,
+            yes,
+        } => cmd_sign(request_file, keypair, output, nonce_store, no_nonce_store, yes),
+
+        Commands::Key(sub) => cmd_key(sub),
+
+        Commands::Ledger(sub) => cmd_ledger(sub),
+
+        Commands::Multisign(sub) => cmd_multisign(sub),
+
+        Commands::Inspect {
+            file,
+            cluster,
+            simulate,
+        } => cmd_inspect(file, cluster, simulate),
+
+        Commands::Prepare(sub) => cmd_prepare(sub),
+
+        Commands::Broadcast {
+            response_file,
+            cluster,
+        } => cmd_broadcast(response_file, cluster),
+
+        Commands::Airdrop { to, amount, cluster } => cmd_airdrop(to, amount, cluster),
+
+        Commands::Run {
+            keypair,
+            to,
+            amount,
+            cluster,
+        } => cmd_run(keypair, to, amount, cluster),
+
+        Commands::Squads(sub) => cmd_squads(sub),
+
+        Commands::AirgapCheck { strict, json } => cmd_airgap_check(strict, json),
+    }
+}
+
+// ─── airgap-check ─────────────────────────────────────────────────────────────
+//
+// Best-effort air-gap verification. Each finding is a "you are NOT properly
+// air-gapped" signal; an empty findings list means the device looks isolated.
+
+#[derive(Debug, serde::Serialize)]
+struct AirgapFinding {
+    /// Stable machine-readable code. Examples: "interface_up",
+    /// "default_route", "rfkill_unblocked", "wifi_active".
+    code: String,
+    /// One-line human-readable explanation.
+    detail: String,
+    /// Suggested remediation, if known.
+    remediation: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AirgapReport {
+    platform: String,
+    is_airgapped: bool,
+    findings: Vec<AirgapFinding>,
+}
+
+fn cmd_airgap_check(_strict: bool, json: bool) -> ! {
+    // `strict` is reserved for future "fail on first finding without printing
+    // the rest of the report". The current implementation always prints the
+    // full report; exit code is 0 iff no findings, 1 otherwise — which is
+    // already shell-script-friendly.
+    let report = collect_airgap_report();
+
+    if json {
+        let s = serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string());
+        println!("{s}");
+    } else {
+        print_airgap_report_human(&report);
+    }
+
+    std::process::exit(if report.is_airgapped { 0 } else { 1 });
+}
+
+fn collect_airgap_report() -> AirgapReport {
+    let platform = std::env::consts::OS.to_string();
+    let mut findings = Vec::new();
+
+    // ── Active network interfaces (best-effort) ─────────────────────────
+    findings.extend(check_active_interfaces());
+
+    // ── Default route ───────────────────────────────────────────────────
+    findings.extend(check_default_route());
+
+    // ── Wireless radios via rfkill (Linux only) ─────────────────────────
+    #[cfg(target_os = "linux")]
+    findings.extend(check_rfkill_linux());
+
+    // ── Wi-Fi services via networksetup (macOS only) ────────────────────
+    #[cfg(target_os = "macos")]
+    findings.extend(check_networksetup_macos());
+
+    AirgapReport {
+        platform,
+        is_airgapped: findings.is_empty(),
+        findings,
+    }
+}
+
+fn check_active_interfaces() -> Vec<AirgapFinding> {
+    use std::process::Command;
+    // `ip -o link show up` lists each up interface on one line on Linux.
+    // On macOS, `ifconfig -lu` lists up interfaces.
+    let mut out = Vec::new();
+    let attempt = if cfg!(target_os = "linux") {
+        Command::new("ip").args(["-o", "link", "show", "up"]).output()
+    } else {
+        Command::new("ifconfig").args(["-lu"]).output()
+    };
+    if let Ok(o) = attempt {
+        let text = String::from_utf8_lossy(&o.stdout);
+        for line in text.lines() {
+            // Skip loopback
+            if line.contains("lo:") || line.starts_with("lo ") || line.contains(" lo ") {
+                continue;
+            }
+            // On macOS `ifconfig -lu` returns space-separated names — split.
+            if cfg!(target_os = "macos") {
+                for name in line.split_whitespace() {
+                    if name == "lo0" || name.is_empty() {
+                        continue;
+                    }
+                    out.push(AirgapFinding {
+                        code: "interface_up".into(),
+                        detail: format!("network interface '{name}' is up"),
+                        remediation: Some(format!(
+                            "run: sudo ifconfig {name} down  (or disable in System Settings)"
+                        )),
+                    });
+                }
+            } else {
+                // Linux: parse the iface name from the second whitespace token (e.g. "2: wlan0:")
+                let mut tokens = line.split_whitespace();
+                let _ = tokens.next();
+                if let Some(iface) = tokens.next() {
+                    let iface = iface.trim_end_matches(':');
+                    if iface == "lo" {
+                        continue;
+                    }
+                    out.push(AirgapFinding {
+                        code: "interface_up".into(),
+                        detail: format!("network interface '{iface}' is up"),
+                        remediation: Some(format!(
+                            "run: sudo ip link set {iface} down  (or unplug the cable / kill Wi-Fi)"
+                        )),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+fn check_default_route() -> Vec<AirgapFinding> {
+    use std::process::Command;
+    let attempt = if cfg!(target_os = "linux") {
+        Command::new("ip").args(["route", "show", "default"]).output()
+    } else {
+        // macOS / BSD
+        Command::new("route").args(["-n", "get", "default"]).output()
+    };
+    if let Ok(o) = attempt {
+        let text = String::from_utf8_lossy(&o.stdout);
+        let trimmed = text.trim();
+        if !trimmed.is_empty() && !trimmed.contains("not in table") && !trimmed.contains("No route") {
+            return vec![AirgapFinding {
+                code: "default_route".into(),
+                detail: format!("default route present: {}", trimmed.lines().next().unwrap_or("")),
+                remediation: Some(
+                    "remove the default gateway: `sudo ip route del default` (Linux) or disconnect the active service (macOS)".into(),
+                ),
+            }];
+        }
+    }
+    Vec::new()
+}
+
+#[cfg(target_os = "linux")]
+fn check_rfkill_linux() -> Vec<AirgapFinding> {
+    use std::process::Command;
+    let mut out = Vec::new();
+    if let Ok(o) = Command::new("rfkill").args(["list"]).output() {
+        let text = String::from_utf8_lossy(&o.stdout);
+        // Parse rfkill output: each block looks like
+        //   0: phy0: Wireless LAN
+        //       Soft blocked: yes
+        //       Hard blocked: no
+        let mut current_label: Option<String> = None;
+        let mut current_soft: Option<bool> = None;
+        let mut current_hard: Option<bool> = None;
+        for line in text.lines() {
+            if let Some((_, rest)) = line.split_once(": ") {
+                let rest = rest.trim();
+                if !rest.starts_with("phy") && !rest.starts_with("hci") && !line.starts_with(" ") {
+                    // New block
+                    push_rfkill_finding(
+                        &mut out,
+                        current_label.take(),
+                        current_soft.take(),
+                        current_hard.take(),
+                    );
+                    current_label = Some(rest.to_string());
+                } else if line.contains("Soft blocked") {
+                    current_soft = Some(line.contains("yes"));
+                } else if line.contains("Hard blocked") {
+                    current_hard = Some(line.contains("yes"));
+                }
+            }
+        }
+        push_rfkill_finding(&mut out, current_label, current_soft, current_hard);
+    }
+    out
+}
+
+#[cfg(target_os = "linux")]
+fn push_rfkill_finding(
+    out: &mut Vec<AirgapFinding>,
+    label: Option<String>,
+    soft: Option<bool>,
+    hard: Option<bool>,
+) {
+    let label = match label {
+        Some(l) => l,
+        None => return,
+    };
+    let blocked = soft.unwrap_or(false) || hard.unwrap_or(false);
+    if !blocked {
+        out.push(AirgapFinding {
+            code: "rfkill_unblocked".into(),
+            detail: format!("radio '{label}' is NOT blocked by rfkill"),
+            remediation: Some(format!("run: sudo rfkill block all  (then re-run airgap-check)")),
+        });
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn check_networksetup_macos() -> Vec<AirgapFinding> {
+    use std::process::Command;
+    let mut out = Vec::new();
+    if let Ok(o) = Command::new("networksetup").args(["-listallhardwareports"]).output() {
+        let text = String::from_utf8_lossy(&o.stdout);
+        // Look for a Wi-Fi block then check power on/off via airport
+        if text.contains("Wi-Fi") || text.contains("AirPort") {
+            if let Ok(p) = Command::new("networksetup").args(["-getairportpower", "en0"]).output() {
+                let s = String::from_utf8_lossy(&p.stdout);
+                if s.to_lowercase().contains("on") {
+                    out.push(AirgapFinding {
+                        code: "wifi_active".into(),
+                        detail: "Wi-Fi power is ON for en0".into(),
+                        remediation: Some(
+                            "run: networksetup -setairportpower en0 off  (or toggle Wi-Fi off in the menubar)".into(),
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+fn print_airgap_report_human(report: &AirgapReport) {
+    if report.is_airgapped {
+        println!("✓ no active networking detected — device looks air-gapped");
+        println!("  platform: {}", report.platform);
+        println!();
+        println!("  Reminder: this command can only see what the OS exposes.");
+        println!("  Physically disabling radios (Wi-Fi/Bluetooth/cellular kill switch)");
+        println!("  remains the gold standard. See docs/HACKATHON/AIRGAP_DISCIPLINE.md.");
+        return;
+    }
+    println!("⚠ device does NOT appear air-gapped — found {} issue(s)", report.findings.len());
+    println!("  platform: {}", report.platform);
+    println!();
+    for (i, f) in report.findings.iter().enumerate() {
+        println!("  {}. [{}] {}", i + 1, f.code, f.detail);
+        if let Some(r) = &f.remediation {
+            println!("       → {}", r);
+        }
+    }
+    println!();
+    println!("Run again after remediating, or pass --strict to fail CI scripts.");
+}
+
+// ─── key sub-commands ────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum KeyCommands {
+    /// Generate a new Ed25519 keypair and store it in the OS keychain.
+    Generate {
+        /// Label (account name) for the keychain entry.
+        #[arg(value_name = "LABEL")]
+        label: String,
+
+        /// Overwrite if the label already exists.
+        #[arg(long)]
+        overwrite: bool,
+
+        /// Also write a Solana CLI keypair JSON to this path.
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+
+    /// Import a Solana CLI keypair JSON file into the OS keychain.
+    Import {
+        /// Label (account name) for the keychain entry.
+        #[arg(value_name = "LABEL")]
+        label: String,
+
+        /// Path to the Solana keypair JSON file (64-byte array).
+        #[arg(long, value_name = "PATH")]
+        file: PathBuf,
+
+        /// Overwrite if the label already exists.
+        #[arg(long)]
+        overwrite: bool,
+    },
+
+    /// Print the Ed25519 public key for a keychain entry.
+    Show {
+        /// Label of the keychain entry.
+        #[arg(value_name = "LABEL")]
+        label: String,
+    },
+
+    /// List all AirSign keychain entries visible to the current user.
+    List,
+
+    /// Export a keychain entry to a Solana CLI keypair JSON file.
+    Export {
+        /// Label of the keychain entry.
+        #[arg(value_name = "LABEL")]
+        label: String,
+
+        /// Output path for the Solana keypair JSON file.
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+    },
+
+    /// Delete a keychain entry (irreversible).
+    Delete {
+        /// Label of the keychain entry.
+        #[arg(value_name = "LABEL")]
+        label: String,
+
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+// ─── cmd_key ──────────────────────────────────────────────────────────────────
+
+fn cmd_key(sub: KeyCommands) {
+    match sub {
+        KeyCommands::Generate { label, overwrite, output } => {
+            if overwrite {
+                // Delete existing entry silently before generating a fresh one.
+                let _ = KeyStore::delete(&label);
+            }
+            let kp = KeyStore::generate(&label).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            eprintln!("[airsign] ✓ generated keypair '{}'", label);
+            eprintln!("[airsign]   public key : {}", kp.pubkey());
+            eprintln!("[airsign]   stored in  : OS keychain (service=airsign, account={})", label);
+
+            if let Some(path) = output {
+                KeyStore::export_to_file(&label, &path).unwrap_or_else(|e| {
+                    eprintln!("error: cannot export to {:?}: {e}", path);
+                    std::process::exit(1);
+                });
+                eprintln!("[airsign]   also saved : {:?}", path);
+            }
+        }
+
+        KeyCommands::Import { label, file, overwrite } => {
+            let kp = KeyStore::import_from_file(&label, &file, overwrite).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            eprintln!("[airsign] ✓ imported keypair '{}'", label);
+            eprintln!("[airsign]   public key : {}", kp.pubkey());
+            eprintln!("[airsign]   source     : {:?}", file);
+        }
+
+        KeyCommands::Show { label } => {
+            let kp = KeyStore::load(&label).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            // Print only the pubkey on stdout for easy scripting
+            println!("{}", kp.pubkey());
+        }
+
+        KeyCommands::List => {
+            // The keyring crate does not expose an enumeration API (OS limitation
+            // on Windows and older macOS), so we maintain a small index file at
+            // ~/.airsign/keys.json and update it on generate/import/delete.
+            // For now, remind the user of the workaround.
+            eprintln!("[airsign] key list: checking OS keychain index…");
+            let index_path = key_index_path();
+            match index_path.as_ref().and_then(|p| std::fs::read(p).ok()) {
+                Some(data) => {
+                    let labels: Vec<String> = serde_json::from_slice(&data).unwrap_or_default();
+                    if labels.is_empty() {
+                        eprintln!("[airsign] no keys found in index.");
+                    } else {
+                        for lbl in &labels {
+                            match KeyStore::load(lbl) {
+                                Ok(kp) => println!("  {}  →  {}", lbl, kp.pubkey()),
+                                Err(_) => println!("  {}  →  (not accessible / deleted)", lbl),
+                            }
+                        }
+                    }
+                }
+                None => {
+                    eprintln!("[airsign] key index not found at {:?}.", index_path);
+                    eprintln!("[airsign] Keys stored before v2.2.0 are not listed here.");
+                    eprintln!("[airsign] Use `airsign key show <LABEL>` to look up individual keys.");
+                }
+            }
+        }
+
+        KeyCommands::Export { label, output } => {
+            KeyStore::export_to_file(&label, &output).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            eprintln!("[airsign] ✓ exported '{}' to {:?}", label, output);
+            eprintln!("[airsign]   treat this file like a private key — keep it safe!");
+        }
+
+        KeyCommands::Delete { label, yes } => {
+            if !yes {
+                eprint!(
+                    "[airsign] delete '{}' from OS keychain? This cannot be undone. [y/N]: ",
+                    label
+                );
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).ok();
+                if !line.trim().eq_ignore_ascii_case("y") {
+                    eprintln!("[airsign] aborted.");
+                    std::process::exit(0);
+                }
+            }
+            KeyStore::delete(&label).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            // Remove from index if present
+            remove_from_key_index(&label);
+            eprintln!("[airsign] ✓ deleted '{}'", label);
+        }
+    }
+}
+
+/// Path to `~/.airsign/keys.json` — a simple label index for `airsign key list`.
+fn key_index_path() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".airsign").join("keys.json"))
+}
+
+/// Add a label to the index (no-op on I/O failure).
+#[allow(dead_code)]
+fn add_to_key_index(label: &str) {
+    let Some(path) = key_index_path() else { return };
+    let mut labels: Vec<String> = path
+        .parent()
+        .and_then(|d| { std::fs::create_dir_all(d).ok() })
+        .and_then(|_| std::fs::read(&path).ok())
+        .and_then(|d| serde_json::from_slice(&d).ok())
+        .unwrap_or_default();
+    if !labels.contains(&label.to_owned()) {
+        labels.push(label.to_owned());
+        if let Ok(json) = serde_json::to_vec(&labels) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+}
+
+/// Remove a label from the index (no-op on I/O failure).
+fn remove_from_key_index(label: &str) {
+    let Some(path) = key_index_path() else { return };
+    let Ok(data) = std::fs::read(&path) else { return };
+    let mut labels: Vec<String> = serde_json::from_slice(&data).unwrap_or_default();
+    labels.retain(|l| l != label);
+    if let Ok(json) = serde_json::to_vec(&labels) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
+// ─── ledger sub-commands ─────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum LedgerCommands {
+    /// List all connected Ledger devices.
+    List,
+
+    /// Print the Ed25519 public key for a BIP44 derivation path.
+    ///
+    /// The Solana app must be open on the Ledger device.
+    Pubkey {
+        /// BIP44 derivation path (default: m/44'/501'/0'/0').
+        #[arg(long, default_value = "m/44'/501'/0'/0'")]
+        derivation: String,
+
+        /// Prompt the user to confirm the pubkey on the Ledger display.
+        #[arg(long)]
+        confirm: bool,
+    },
+
+    /// Print the Solana app version installed on the Ledger device.
+    Version,
+}
+
+// ─── cmd_ledger ───────────────────────────────────────────────────────────────
+
+fn cmd_ledger(sub: LedgerCommands) {
+    match sub {
+        LedgerCommands::List => {
+            let devices = LedgerSigner::list_devices().unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            if devices.is_empty() {
+                eprintln!("[airsign] no Ledger devices found.");
+                eprintln!("[airsign] connect a Ledger, unlock it, and open the Solana app.");
+            } else {
+                eprintln!("[airsign] {} Ledger device(s) found:", devices.len());
+                for (i, dev) in devices.iter().enumerate() {
+                    let name = dev.product_string.as_deref().unwrap_or("Ledger device");
+                    let serial = dev.serial_number.as_deref().unwrap_or("unknown");
+                    eprintln!("  [{}] {}  serial={}  path={}", i, name, serial, dev.path);
+                }
+            }
+        }
+
+        LedgerCommands::Pubkey { derivation, confirm } => {
+            let path = DerivationPath::parse(&derivation).unwrap_or_else(|e| {
+                eprintln!("error: invalid derivation path {:?}: {e}", derivation);
+                std::process::exit(1);
+            });
+            let signer = LedgerSigner::connect().unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            eprintln!("[airsign] Ledger: {}", signer.info);
+            if confirm {
+                eprintln!("[airsign] please approve on the Ledger display…");
+            }
+            let pubkey = signer.pubkey(&path, confirm).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            println!("{pubkey}");
+        }
+
+        LedgerCommands::Version => {
+            let signer = LedgerSigner::connect().unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            eprintln!("[airsign] Ledger: {}", signer.info);
+            let version = signer.app_version().unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            println!("Solana app v{version}");
+        }
+    }
+}
+
+// ─── multisign sub-commands ───────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum MultisignCommands {
+    /// Create a round-1 MultiSignRequest from an unsigned transaction binary.
+    ///
+    /// The transaction binary must be a raw bincode-serialised
+    /// `solana_sdk::transaction::Transaction` (unsigned).
+    Init {
+        /// Path to the unsigned transaction binary file.
+        #[arg(value_name = "TX_FILE")]
+        tx_file: PathBuf,
+
+        /// Comma-separated ordered list of signer public keys (base58).
+        /// Round 1 goes to the first key, round 2 to the second, etc.
+        #[arg(long, value_name = "PUBKEY,...")]
+        signers: String,
+
+        /// Minimum number of signatures required (M in M-of-N).
+        #[arg(long, value_name = "N")]
+        threshold: u8,
+
+        /// Human-readable description embedded in the request.
+        #[arg(long, default_value = "")]
+        description: String,
+
+        /// Solana cluster hint embedded in the request.
+        #[arg(long, default_value = "devnet")]
+        cluster: String,
+
+        /// Output path for the round-1 MultiSignRequest JSON.
+        #[arg(long, default_value = "round1.json")]
+        out: PathBuf,
+    },
+
+    /// Sign a MultiSignRequest JSON (air-gapped machine).
+    ///
+    /// Reads a MultiSignRequest JSON, verifies all prior partial signatures,
+    /// signs with the provided keypair, and writes a MultiSignResponse JSON.
+    Sign {
+        /// Path to the MultiSignRequest JSON file.
+        #[arg(value_name = "REQUEST_FILE")]
+        request_file: PathBuf,
+
+        /// Path to the Solana keypair JSON file (64-byte array).
+        #[arg(long, value_name = "PATH", env = "AIRSIGN_KEYPAIR")]
+        keypair: PathBuf,
+
+        /// Output path for the MultiSignResponse JSON.
+        #[arg(long, default_value = "multisig_response.json")]
+        out: PathBuf,
+    },
+
+    /// Advance to the next round (online machine).
+    ///
+    /// Combines a MultiSignResponse with the original MultiSignRequest to
+    /// produce the next round's MultiSignRequest JSON.  If the response is
+    /// already complete (threshold met), exits with a message instead.
+    Next {
+        /// Path to the MultiSignResponse JSON from the previous round.
+        #[arg(value_name = "RESPONSE_FILE")]
+        response_file: PathBuf,
+
+        /// Path to the original (round-1) MultiSignRequest JSON.
+        #[arg(long, value_name = "PATH")]
+        request: PathBuf,
+
+        /// Output path for the next round's MultiSignRequest JSON.
+        #[arg(long, default_value = "next_round.json")]
+        out: PathBuf,
+    },
+}
+
+// ─── multisign ────────────────────────────────────────────────────────────────
+
+fn cmd_multisign(sub: MultisignCommands) {
+    match sub {
+        MultisignCommands::Init {
+            tx_file,
+            signers,
+            threshold,
+            description,
+            cluster,
+            out,
+        } => {
+            // Parse the tx binary
+            let tx_bytes = std::fs::read(&tx_file).unwrap_or_else(|e| {
+                eprintln!("error: cannot read {:?}: {e}", tx_file);
+                std::process::exit(1);
+            });
+            let tx: solana_sdk::transaction::Transaction =
+                bincode::deserialize(&tx_bytes).unwrap_or_else(|e| {
+                    eprintln!("error: {:?} is not a valid bincode Transaction: {e}", tx_file);
+                    std::process::exit(1);
+                });
+
+            // Parse signer pubkeys
+            let signer_pubkeys: Vec<solana_sdk::pubkey::Pubkey> = signers
+                .split(',')
+                .map(|s| {
+                    s.trim()
+                        .parse::<solana_sdk::pubkey::Pubkey>()
+                        .unwrap_or_else(|e| {
+                            eprintln!("error: invalid signer pubkey {:?}: {e}", s);
+                            std::process::exit(1);
+                        })
+                })
+                .collect();
+
+            let req = build_multisig_session(&tx, &signer_pubkeys, threshold, &description, &cluster)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+
+            let json = req.to_json().unwrap_or_else(|e| {
+                eprintln!("error: serialise: {e}");
+                std::process::exit(1);
+            });
+            std::fs::write(&out, &json).unwrap_or_else(|e| {
+                eprintln!("error: cannot write {:?}: {e}", out);
+                std::process::exit(1);
+            });
+
+            eprintln!("[airsign] multisign init: round-1 request written to {:?}", out);
+            eprintln!(
+                "[airsign]   signers: {} | threshold: {}/{} | cluster: {}",
+                signer_pubkeys.len(),
+                threshold,
+                signer_pubkeys.len(),
+                cluster
+            );
+            eprintln!("[airsign]   next step: airsign send {:?}", out);
+        }
+
+        MultisignCommands::Sign {
+            request_file,
+            keypair,
+            out,
+        } => {
+            let req_bytes = std::fs::read(&request_file).unwrap_or_else(|e| {
+                eprintln!("error: cannot read {:?}: {e}", request_file);
+                std::process::exit(1);
+            });
+            let req = MultiSignRequest::from_json(&req_bytes).unwrap_or_else(|e| {
+                eprintln!("error: {:?} is not a valid MultiSignRequest: {e}", request_file);
+                std::process::exit(1);
+            });
+
+            // Load keypair
+            let kp_text = std::fs::read_to_string(&keypair).unwrap_or_else(|e| {
+                eprintln!("error: cannot read keypair {:?}: {e}", keypair);
+                std::process::exit(1);
+            });
+            let kp_bytes: Vec<u8> = serde_json::from_str(&kp_text).unwrap_or_else(|e| {
+                eprintln!("error: {:?} is not a valid Solana keypair JSON: {e}", keypair);
+                std::process::exit(1);
+            });
+
+            let ms = MultiSigner::from_bytes(&kp_bytes).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+
+            eprintln!(
+                "[airsign] multisign sign: round {} | signer {} | threshold {}/{}",
+                req.round,
+                ms.pubkey(),
+                req.threshold,
+                req.signers.len()
+            );
+            if !req.description.is_empty() {
+                eprintln!("[airsign]   description: {}", req.description);
+            }
+
+            let resp = ms.sign_multi_request(&req).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+
+            let json = resp.to_json().unwrap_or_else(|e| {
+                eprintln!("error: serialise: {e}");
+                std::process::exit(1);
+            });
+            std::fs::write(&out, &json).unwrap_or_else(|e| {
+                eprintln!("error: cannot write {:?}: {e}", out);
+                std::process::exit(1);
+            });
+
+            if resp.complete {
+                eprintln!("[airsign] ✓ threshold met — session COMPLETE");
+                eprintln!("[airsign]   signed_transaction_b64 ready for broadcast");
+            } else {
+                eprintln!(
+                    "[airsign]   {}/{} signatures collected — session ongoing",
+                    resp.partial_sigs.len(),
+                    req.threshold
+                );
+            }
+            eprintln!("[airsign]   response written to {:?}", out);
+            eprintln!("[airsign]   next step: airsign send {:?}", out);
+        }
+
+        MultisignCommands::Next {
+            response_file,
+            request,
+            out,
+        } => {
+            let resp_bytes = std::fs::read(&response_file).unwrap_or_else(|e| {
+                eprintln!("error: cannot read {:?}: {e}", response_file);
+                std::process::exit(1);
+            });
+            let resp = MultiSignResponse::from_json(&resp_bytes).unwrap_or_else(|e| {
+                eprintln!("error: {:?} is not a valid MultiSignResponse: {e}", response_file);
+                std::process::exit(1);
+            });
+
+            if resp.complete {
+                eprintln!("[airsign] multisign next: threshold already met — no further rounds needed.");
+                eprintln!("[airsign]   decode signed_transaction_b64 from {:?} and broadcast.", response_file);
+                std::process::exit(0);
+            }
+
+            let orig_bytes = std::fs::read(&request).unwrap_or_else(|e| {
+                eprintln!("error: cannot read {:?}: {e}", request);
+                std::process::exit(1);
+            });
+            let orig_req = MultiSignRequest::from_json(&orig_bytes).unwrap_or_else(|e| {
+                eprintln!("error: {:?} is not a valid MultiSignRequest: {e}", request);
+                std::process::exit(1);
+            });
+
+            let next_req = advance_round_from(&resp, &orig_req).unwrap_or_else(|| {
+                eprintln!("[airsign] multisign next: session already complete.");
+                std::process::exit(0);
+            });
+
+            let json = next_req.to_json().unwrap_or_else(|e| {
+                eprintln!("error: serialise: {e}");
+                std::process::exit(1);
+            });
+            std::fs::write(&out, &json).unwrap_or_else(|e| {
+                eprintln!("error: cannot write {:?}: {e}", out);
+                std::process::exit(1);
+            });
+
+            eprintln!(
+                "[airsign] multisign next: round-{} request written to {:?}",
+                next_req.round, out
+            );
+            eprintln!(
+                "[airsign]   partial sigs so far: {}/{}",
+                next_req.partial_sigs.len(),
+                next_req.threshold
+            );
+            eprintln!("[airsign]   next step: airsign send {:?}", out);
+        }
+    }
+}
+
+// ─── sign ─────────────────────────────────────────────────────────────────────
+
+/// Resolve a keypair from a file path, `keychain:<label>`, or `ledger:[PATH]` specifier.
+///
+/// Returns the raw 64-byte keypair material.
+///
+/// For `ledger:` specifiers the keypair material is constructed from the public key
+/// returned by the Ledger device together with a zero secret key — **this is only
+/// suitable for uses that only need the public key** (e.g. building a `SignRequest`).
+/// Actual signing against a Ledger is handled by [`cmd_sign`] directly.
+fn resolve_keypair_bytes(spec: &str) -> Vec<u8> {
+    if let Some(label) = spec.strip_prefix("keychain:") {
+        // Load from OS keychain
+        let kp = KeyStore::load(label).unwrap_or_else(|e| {
+            eprintln!("error: keychain load '{}': {e}", label);
+            std::process::exit(1);
+        });
+        eprintln!("[airsign] keypair source: keychain:{}", label);
+        kp.to_bytes().to_vec()
+    } else if spec.starts_with("ledger:") {
+        // For keypair resolution we only need the public key bytes.
+        // The actual signature will be produced by cmd_sign using ledger_sign_request().
+        // Return a sentinel value; cmd_sign detects the ledger: prefix separately.
+        vec![0u8; 64]
+    } else {
+        // Load from file
+        let path = PathBuf::from(spec);
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            eprintln!("error: cannot read keypair {:?}: {e}", path);
+            std::process::exit(1);
+        });
+        let bytes: Vec<u8> = serde_json::from_str(&text).unwrap_or_else(|e| {
+            eprintln!(
+                "error: {:?} is not a valid Solana keypair JSON (expected [u8; 64]): {e}",
+                path
+            );
+            std::process::exit(1);
+        });
+        if bytes.len() != 64 {
+            eprintln!(
+                "error: keypair must be 64 bytes, got {} bytes in {:?}",
+                bytes.len(),
+                path
+            );
+            std::process::exit(1);
+        }
+        bytes
+    }
+}
+
+fn cmd_sign(
+    request_file: PathBuf,
+    keypair_spec: String,
+    output: PathBuf,
+    nonce_store_override: Option<PathBuf>,
+    no_nonce_store: bool,
+    yes: bool,
+) {
+    // 1. Read the SignRequest JSON
+    let request_json = std::fs::read(&request_file).unwrap_or_else(|e| {
+        eprintln!("error: cannot read {:?}: {e}", request_file);
+        std::process::exit(1);
+    });
+
+    // Validate it parses before loading the keypair
+    let req = SignRequest::from_json(&request_json).unwrap_or_else(|e| {
+        eprintln!("error: {:?} is not a valid SignRequest: {e}", request_file);
+        std::process::exit(1);
+    });
+
+    // 2. Resolve the keypair (file path or keychain label)
+    let kp_bytes = resolve_keypair_bytes(&keypair_spec);
+
+    // 3. Build AirSigner with appropriate nonce store
+    // Password is not used for local sign_request() calls (only for QR sessions)
+    let signer = {
+        let base = AirSigner::from_bytes(&kp_bytes, "");
+        if no_nonce_store {
+            eprintln!("[airsign] ⚠  nonce store disabled — replay protection off");
+            base
+        } else if let Some(path) = nonce_store_override {
+            base.with_nonce_store(path)
+        } else {
+            match default_nonce_store_path() {
+                Some(p) => {
+                    eprintln!("[airsign] nonce store: {}", p.display());
+                    base.with_nonce_store(p)
+                }
+                None => {
+                    eprintln!("[airsign] ⚠  could not determine HOME, nonce store disabled");
+                    base
+                }
+            }
+        }
+    };
+
+    // 4. Verify the keypair matches the request's signer_pubkey
+    let our_pubkey = signer.pubkey().to_string();
+    if our_pubkey != req.signer_pubkey {
+        eprintln!(
+            "error: keypair pubkey {our_pubkey}\n       does not match request signer {}\n       Wrong keypair file?",
+            req.signer_pubkey
+        );
+        std::process::exit(1);
+    }
+
+    // 5. Sign — with or without interactive confirmation
+    let response = if yes {
+        // Print summary but skip the stdin prompt
+        eprintln!("{}", summarize_request(&req));
+        eprintln!("\n[airsign] --yes flag set, signing without interactive prompt");
+        signer.sign_request(&request_json)
+    } else {
+        // sign_request_confirmed() prints the summary and asks yes/no
+        signer.sign_request_confirmed(&request_json)
+    };
+
+    let response = response.unwrap_or_else(|e| {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    });
+
+    // 6. Write the SignResponse JSON
+    let response_json = response.to_json().unwrap_or_else(|e| {
+        eprintln!("error: failed to serialise response: {e}");
+        std::process::exit(1);
+    });
+    std::fs::write(&output, &response_json).unwrap_or_else(|e| {
+        eprintln!("error: cannot write {:?}: {e}", output);
+        std::process::exit(1);
+    });
+
+    eprintln!(
+        "[airsign] ✓ signed — response written to {:?}",
+        output
+    );
+    eprintln!(
+        "[airsign]   signature: {}",
+        response.signature_b64
+    );
+    eprintln!("[airsign]   next step: airsign send {:?}", output);
+}
+
+// ─── send ─────────────────────────────────────────────────────────────────────
+
+fn cmd_send(
+    file: PathBuf,
+    fps: u32,
+    window_size: usize,
+    password: Option<String>,
+    security_profile: Option<String>,
+    argon2_mem: u32,
+    argon2_iter: u32,
+) {
+    let data = std::fs::read(&file).unwrap_or_else(|e| {
+        eprintln!("error: cannot read {:?}: {e}", file);
+        std::process::exit(1);
+    });
+
+    let password = resolve_password(password, "Encryption password: ");
+
+    let filename = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("data.bin");
+
+    // Resolve Argon2 params — preset takes priority over manual flags.
+    let argon2_params = if let Some(ref profile_str) = security_profile {
+        let profile = SecurityProfile::from_str(profile_str).unwrap_or_else(|| {
+            eprintln!(
+                "error: unknown --security-profile {:?}. \
+                 Valid values: owasp-2024, mainnet, paranoid",
+                profile_str
+            );
+            std::process::exit(1);
+        });
+        eprintln!("[airsign] security profile: {} ({})", profile.name(), profile.description());
+        profile.to_params()
+    } else {
+        let params = Argon2Params {
+            m_cost: argon2_mem,
+            t_cost: argon2_iter,
+            p_cost: afterimage_core::crypto::ARGON2_P_COST,
+        };
+        eprintln!(
+            "[airsign] security profile: custom (m={} KiB = {} MiB, t={}, p={})",
+            params.m_cost,
+            params.m_cost / 1024,
+            params.t_cost,
+            params.p_cost,
+        );
+        params
+    };
+
+    // Warn if below mainnet minimum
+    if !argon2_params.meets_mainnet_minimum() {
+        eprintln!(
+            "[airsign] ⚠  params below mainnet minimum (256 MiB / t=4). \
+             Use --security-profile mainnet for mainnet-beta transactions."
+        );
+    }
+
+    let mut session =
+        SendSession::new_with_argon2_params(&data, filename, &password, argon2_params)
+            .unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+
+    let frame_ms = 1000 / fps.max(1);
+    let recommended = session.recommended_droplet_count();
+
+    eprintln!(
+        "[afterimage] send: {} bytes | ~{} droplets recommended | {fps} fps | \
+         security: {}",
+        data.len(),
+        recommended,
+        argon2_params.security_level(),
+    );
+
+    #[cfg(feature = "display")]
+    {
+        use afterimage_optical::display::QrDisplay;
+
+        let mut disp = QrDisplay::new("AfterImage — Transmitting", window_size)
+            .unwrap_or_else(|e| {
+                eprintln!("error opening window: {e}");
+                std::process::exit(1);
+            });
+        disp.frame_ms = frame_ms as u64;
+
+        let count = disp.run_session(&mut session);
+        eprintln!("[afterimage] sent {count} frames");
+    }
+
+    #[cfg(not(feature = "display"))]
+    {
+        use afterimage_optical::qr::encode_qr;
+        let _ = (frame_ms, window_size);
+        eprintln!("[afterimage] display feature not enabled — saving QR PNGs instead");
+        let mut i = 0usize;
+        while let Some(frame) = session.next_frame() {
+            let qr = encode_qr(&frame).unwrap();
+            qr.save_png(&format!("frame_{i:05}.png")).unwrap();
+            i += 1;
+        }
+        eprintln!("[afterimage] saved {i} QR PNG files");
+    }
+}
+
+// ─── recv ─────────────────────────────────────────────────────────────────────
+
+fn cmd_recv(output: PathBuf, camera_index: u32, password: Option<String>) {
+    let password = resolve_password(password, "Decryption password: ");
+
+    eprintln!("[afterimage] recv: waiting for QR stream on camera {camera_index}…");
+
+    #[cfg(feature = "camera")]
+    {
+        use afterimage_optical::camera::CameraReceiver;
+
+        let mut rx = CameraReceiver::open(camera_index, &password).unwrap_or_else(|e| {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        });
+
+        let data = rx.receive().unwrap_or_else(|e| {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        });
+
+        std::fs::write(&output, &data).unwrap_or_else(|e| {
+            eprintln!("error writing {:?}: {e}", output);
+            std::process::exit(1);
+        });
+
+        eprintln!(
+            "[afterimage] recv: wrote {} bytes to {:?}",
+            data.len(),
+            output
+        );
+    }
+
+    #[cfg(not(feature = "camera"))]
+    {
+        let _ = (output, camera_index, password);
+        eprintln!("error: camera feature not enabled; rebuild with --features camera");
+        std::process::exit(1);
+    }
+}
+
+// ─── bench ────────────────────────────────────────────────────────────────────
+
+fn cmd_bench(file: PathBuf, password: String) {
+    let data = std::fs::read(&file).unwrap_or_else(|e| {
+        eprintln!("error: cannot read {:?}: {e}", file);
+        std::process::exit(1);
+    });
+
+    let size = data.len();
+    eprintln!("[bench] file size: {size} bytes");
+
+    // ── Encode phase ──────────────────────────────────────────────────────
+    let t0 = std::time::Instant::now();
+    let mut send = SendSession::new(&data, "bench.bin", &password).unwrap_or_else(|e| {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    });
+
+    let recommended = send.recommended_droplet_count();
+    let limit = (recommended * 3) as u32 + 200;
+    send.set_limit(limit);
+
+    let frames: Vec<Vec<u8>> = std::iter::from_fn(|| send.next_frame()).collect();
+    let encode_ms = t0.elapsed().as_millis();
+    eprintln!(
+        "[bench] encoded {} frames in {encode_ms} ms ({:.1} MB/s)",
+        frames.len(),
+        size as f64 / 1e6 / (encode_ms as f64 / 1000.0).max(0.001)
+    );
+
+    // ── Decode phase ──────────────────────────────────────────────────────
+    let pb = ProgressBar::new(frames.len() as u64);
+    pb.set_style(
+        ProgressStyle::with_template("[bench] decoding {bar:40} {pos}/{len} frames").unwrap(),
+    );
+
+    let t1 = std::time::Instant::now();
+    let mut recv = RecvSession::new(&password);
+    for frame in &frames {
+        pb.inc(1);
+        if recv.ingest_frame(frame).unwrap() {
+            break;
+        }
+    }
+    pb.finish_and_clear();
+
+    let decode_ms = t1.elapsed().as_millis();
+
+    if recv.is_complete() {
+        let recovered = recv.get_data().unwrap();
+        if recovered == data {
+            eprintln!(
+                "[bench] ✓ roundtrip OK in {decode_ms} ms ({:.1} MB/s)",
+                size as f64 / 1e6 / (decode_ms as f64 / 1000.0).max(0.001)
+            );
+        } else {
+            eprintln!("[bench] ✗ data mismatch after roundtrip!");
+            std::process::exit(2);
+        }
+    } else {
+        eprintln!(
+            "[bench] ✗ decoding incomplete after {} frames (progress={:.1}%)",
+            frames.len(),
+            recv.progress() * 100.0
+        );
+        std::process::exit(2);
+    }
+}
+
+// ─── inspect ──────────────────────────────────────────────────────────────────
+
+fn cmd_inspect(file: PathBuf, cluster: Option<String>, simulate: bool) {
+    // ── Load file ──────────────────────────────────────────────────────────────
+    let raw = std::fs::read(&file).unwrap_or_else(|e| {
+        eprintln!("error: cannot read {:?}: {e}", file);
+        std::process::exit(1);
+    });
+
+    // ── Determine input format and extract tx bytes ────────────────────────────
+    // Try SignRequest JSON first, then raw bincode Transaction.
+    let tx_bytes: Vec<u8> = if let Ok(req) = SignRequest::from_json(&raw) {
+        eprintln!("[airsign] inspect: parsed as SignRequest JSON");
+        eprintln!("[airsign]   description : {}", req.description);
+        eprintln!("[airsign]   cluster     : {}", req.cluster);
+        eprintln!("[airsign]   signer      : {}", req.signer_pubkey);
+        match req.decode_transaction() {
+            Ok(tx) => bincode::serialize(&tx).unwrap_or_else(|e| {
+                eprintln!("error: re-serialise tx: {e}");
+                std::process::exit(1);
+            }),
+            Err(e) => {
+                eprintln!("error: cannot decode transaction in SignRequest: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // Assume raw bincode Transaction
+        eprintln!("[airsign] inspect: treating file as raw bincode Transaction");
+        raw
+    };
+
+    // ── Static analysis ────────────────────────────────────────────────────────
+    let summary = TransactionInspector::inspect(&tx_bytes).unwrap_or_else(|e| {
+        eprintln!("error: could not parse transaction: {e}");
+        std::process::exit(1);
+    });
+
+    println!("{}", summary.render());
+
+    // Exit with code 2 if HIGH risk (allows scripted gating)
+    let exit_code = if summary.has_high_risk() { 2i32 } else { 0i32 };
+
+    // ── Pre-flight / simulation (optional) ────────────────────────────────────
+    if let Some(ref cluster_hint) = cluster {
+        let rpc_url = resolve_cluster_url(cluster_hint);
+        eprintln!("[airsign] running pre-flight check against {}…", rpc_url);
+        let checker = PreflightChecker::new(&rpc_url);
+        match checker.check(&tx_bytes) {
+            Ok(result) => {
+                println!("{}", result.render());
+                if simulate && !result.success {
+                    eprintln!("[airsign] ⚠  simulation indicates this transaction would FAIL");
+                    std::process::exit(exit_code.max(1));
+                }
+            }
+            Err(e) => {
+                eprintln!("[airsign] ⚠  pre-flight check failed: {e}");
+            }
+        }
+    }
+
+    std::process::exit(exit_code);
+}
+
+// ─── helpers ──────────────────────────────────────────────────────────────────
+
+/// Resolve cluster shorthand → RPC URL.
+fn resolve_rpc_url(cluster: &str) -> String {
+    match cluster {
+        "devnet"  => afterimage_solana::broadcaster::DEVNET_URL.to_owned(),
+        "testnet" => afterimage_solana::broadcaster::TESTNET_URL.to_owned(),
+        "mainnet" => afterimage_solana::broadcaster::MAINNET_URL.to_owned(),
+        custom    => custom.to_owned(),
+    }
+}
+
+/// Parse a base-58 pubkey, exit on error.
+fn parse_pubkey_arg(s: &str, flag: &str) -> solana_sdk::pubkey::Pubkey {
+    s.parse::<solana_sdk::pubkey::Pubkey>().unwrap_or_else(|e| {
+        eprintln!("error: invalid {flag} pubkey '{}': {e}", s);
+        std::process::exit(1);
+    })
+}
+
+/// Convert SOL (f64) to lamports.
+fn sol_to_lamports(sol: f64) -> u64 {
+    (sol * 1_000_000_000.0).round() as u64
+}
+
+/// Load a Solana keypair from a 64-byte JSON-array file.
+fn load_keypair_file(path: &PathBuf) -> solana_sdk::signature::Keypair {
+    let data = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("error: cannot read keypair file {:?}: {e}", path);
+        std::process::exit(1);
+    });
+    let bytes: Vec<u8> = serde_json::from_str(&data).unwrap_or_else(|e| {
+        eprintln!("error: invalid keypair JSON in {:?}: {e}", path);
+        std::process::exit(1);
+    });
+    if bytes.len() != 64 {
+        eprintln!(
+            "error: keypair must be 64 bytes (got {}). Export with `solana-keygen new` or \
+             `airsign key export`.",
+            bytes.len()
+        );
+        std::process::exit(1);
+    }
+    solana_sdk::signature::Keypair::from_bytes(&bytes).unwrap_or_else(|e| {
+        eprintln!("error: cannot decode keypair: {e}");
+        std::process::exit(1);
+    })
+}
+
+// ─── broadcast ────────────────────────────────────────────────────────────────
+
+fn cmd_broadcast(response_file: PathBuf, cluster: String) {
+    let json_bytes = std::fs::read(&response_file).unwrap_or_else(|e| {
+        eprintln!("error: cannot read {:?}: {e}", response_file);
+        std::process::exit(1);
+    });
+
+    let rpc_url = resolve_rpc_url(&cluster);
+
+    eprintln!("[airsign] broadcasting to {}…", rpc_url);
+
+    let b = Broadcaster::new(&rpc_url);
+
+    match b.broadcast_response_json(&json_bytes) {
+        Ok(sig) => {
+            println!("{sig}");
+            let cluster_param = match cluster.as_str() {
+                "mainnet" => String::new(),
+                other => format!("?cluster={other}"),
+            };
+            eprintln!(
+                "[airsign] ✓ confirmed on {}\nhttps://explorer.solana.com/tx/{sig}{cluster_param}",
+                b.cluster
+            );
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+// ─── airdrop ──────────────────────────────────────────────────────────────────
+
+fn cmd_airdrop(to: String, amount: f64, cluster: String) {
+    let rpc_url = resolve_rpc_url(&cluster);
+
+    if cluster == "mainnet" || rpc_url.contains("mainnet-beta") {
+        eprintln!("error: airdrop is not available on mainnet-beta");
+        std::process::exit(1);
+    }
+
+    let lamports = sol_to_lamports(amount);
+    eprintln!(
+        "[airsign] requesting airdrop of {} SOL ({} lamports) → {} on {}…",
+        amount, lamports, to, cluster
+    );
+
+    let b = Broadcaster::new(&rpc_url);
+    match b.airdrop(&to, lamports) {
+        Ok(sig) => {
+            println!("{sig}");
+            eprintln!("[airsign] ✓ airdrop submitted — sig: {sig}");
+            eprintln!("{}", b.explorer_url(&sig));
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+// ─── run (end-to-end pipeline) ────────────────────────────────────────────────
+
+fn cmd_run(keypair: PathBuf, to: String, amount: f64, cluster: String) {
+    use solana_sdk::{
+        message::Message,
+        signature::Signer,
+        system_instruction,
+        transaction::Transaction,
+    };
+
+    let rpc_url = resolve_rpc_url(&cluster);
+    let kp      = load_keypair_file(&keypair);
+    let from_pk = kp.pubkey();
+    let to_pk   = parse_pubkey_arg(&to, "--to");
+    let lamports = sol_to_lamports(amount);
+
+    eprintln!(
+        "[airsign] run: {} → {} | {} SOL ({} lamports) | cluster: {}",
+        from_pk, to_pk, amount, lamports, cluster
+    );
+
+    // Build unsigned transaction
+    let b = Broadcaster::new(&rpc_url);
+    let blockhash = b.get_latest_blockhash().unwrap_or_else(|e| {
+        eprintln!("error: cannot fetch latest blockhash: {e}");
+        std::process::exit(1);
+    });
+
+    let ix  = system_instruction::transfer(&from_pk, &to_pk, lamports);
+    let msg = Message::new(&[ix], Some(&from_pk));
+    let tx  = Transaction::new(&[&kp], msg, blockhash);
+
+    eprintln!("[airsign] ✓ transaction built and signed locally");
+    eprintln!("[airsign] broadcasting to {}…", rpc_url);
+
+    match b.broadcast_signed_transaction(&tx) {
+        Ok(sig) => {
+            println!("{sig}");
+            eprintln!("[airsign] ✓ confirmed!");
+            eprintln!("  Explorer : {}", b.explorer_url(&sig));
+            eprintln!("  Solscan  : {}", b.solscan_url(&sig));
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+// ─── prepare sub-commands ─────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum PrepareCommands {
+    /// Build an unsigned SOL transfer transaction.
+    ///
+    /// The fee payer and sender are the same wallet (--from).
+    Transfer {
+        /// Sender / fee-payer public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        from: String,
+
+        /// Recipient public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        to: String,
+
+        /// Amount in SOL (e.g. 1.5).  Converted to lamports automatically.
+        #[arg(long, value_name = "SOL")]
+        amount: f64,
+
+        /// Optional UTF-8 memo to attach.
+        #[arg(long, value_name = "TEXT")]
+        memo: Option<String>,
+
+        /// Solana cluster (devnet | mainnet | testnet | URL).
+        /// Used to fetch the recent blockhash.
+        #[arg(long, default_value = "devnet")]
+        cluster: String,
+
+        /// Output file path for the bincode Transaction.
+        #[arg(long, default_value = "unsigned_tx.bin")]
+        out: PathBuf,
+    },
+
+    /// Build an unsigned SPL Token TransferChecked transaction.
+    ///
+    /// Source and destination are Associated Token Accounts (ATAs).
+    /// Use --from-ata / --to-ata if you want to supply explicit ATA addresses;
+    /// otherwise they are derived automatically from the wallet public keys.
+    #[command(name = "token-transfer")]
+    TokenTransfer {
+        /// Wallet / fee-payer public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        from: String,
+
+        /// Source ATA public key.  If omitted, derived from --from + --mint.
+        #[arg(long, value_name = "PUBKEY")]
+        from_ata: Option<String>,
+
+        /// Recipient wallet public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        to: String,
+
+        /// Destination ATA public key.  If omitted, derived from --to + --mint.
+        #[arg(long, value_name = "PUBKEY")]
+        to_ata: Option<String>,
+
+        /// Mint public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        mint: String,
+
+        /// Token amount in the smallest unit (raw, not decimal-adjusted).
+        #[arg(long, value_name = "AMOUNT")]
+        amount: u64,
+
+        /// Token decimals (as stored in the mint account).
+        #[arg(long, default_value_t = 6, value_name = "N")]
+        decimals: u8,
+
+        /// Optional UTF-8 memo.
+        #[arg(long, value_name = "TEXT")]
+        memo: Option<String>,
+
+        /// Solana cluster for blockhash fetch.
+        #[arg(long, default_value = "devnet")]
+        cluster: String,
+
+        /// Output file path for the bincode Transaction.
+        #[arg(long, default_value = "unsigned_tx.bin")]
+        out: PathBuf,
+    },
+
+    /// Build an unsigned Stake Withdraw transaction.
+    ///
+    /// Withdraws `--amount` SOL (or all, if --amount-all is set) from a stake
+    /// account to a recipient address.  The fee-payer wallet is used as the
+    /// withdraw authority.
+    #[command(name = "stake-withdraw")]
+    StakeWithdraw {
+        /// Withdraw authority / fee-payer public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        from: String,
+
+        /// Stake account public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        stake_account: String,
+
+        /// Recipient public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        to: String,
+
+        /// Amount in SOL.  Mutually exclusive with --amount-all.
+        #[arg(long, value_name = "SOL", conflicts_with = "amount_all")]
+        amount: Option<f64>,
+
+        /// Withdraw the entire stake account balance.
+        #[arg(long, conflicts_with = "amount")]
+        amount_all: bool,
+
+        /// Override lamports directly (skips SOL conversion).
+        #[arg(long, value_name = "LAMPORTS", conflicts_with_all = &["amount", "amount_all"])]
+        lamports: Option<u64>,
+
+        /// Optional UTF-8 memo.
+        #[arg(long, value_name = "TEXT")]
+        memo: Option<String>,
+
+        /// Solana cluster for blockhash fetch.
+        #[arg(long, default_value = "devnet")]
+        cluster: String,
+
+        /// Output file path for the bincode Transaction.
+        #[arg(long, default_value = "unsigned_tx.bin")]
+        out: PathBuf,
+    },
+}
+
+// ─── cmd_prepare ──────────────────────────────────────────────────────────────
+
+fn cmd_prepare(sub: PrepareCommands) {
+    match sub {
+        // ── transfer ──────────────────────────────────────────────────────────
+        PrepareCommands::Transfer {
+            from,
+            to,
+            amount,
+            memo,
+            cluster,
+            out,
+        } => {
+            let from_pk = parse_pubkey(&from, "--from");
+            let to_pk = parse_pubkey(&to, "--to");
+            let lamports = sol_to_lamports(amount);
+            let rpc_url = resolve_cluster_url(&cluster);
+
+            eprintln!(
+                "[airsign] prepare transfer: {} → {} | {:.9} SOL ({} lamports) | cluster: {}",
+                from_pk, to_pk, amount, lamports, rpc_url
+            );
+
+            let wallet = WatchWallet::new(from_pk, &rpc_url);
+            let mut builder = wallet.builder().transfer(to_pk, lamports);
+            if let Some(text) = memo {
+                builder = builder.memo(text);
+            }
+
+            let tx = builder.build().unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+
+            write_tx_bin(&tx, &out);
+            eprintln!("[airsign] ✓ unsigned transaction written to {:?}", out);
+            eprintln!("[airsign]   next step: airsign inspect {:?} --cluster {} --simulate", out, cluster);
+            eprintln!("[airsign]              airsign send {:?}", out);
+        }
+
+        // ── token-transfer ────────────────────────────────────────────────────
+        PrepareCommands::TokenTransfer {
+            from,
+            from_ata,
+            to,
+            to_ata,
+            mint,
+            amount,
+            decimals,
+            memo,
+            cluster,
+            out,
+        } => {
+            let from_pk = parse_pubkey(&from, "--from");
+            let to_pk = parse_pubkey(&to, "--to");
+            let mint_pk = parse_pubkey(&mint, "--mint");
+            let rpc_url = resolve_cluster_url(&cluster);
+
+            // Derive ATAs if not explicitly supplied
+            let source_ata = from_ata
+                .as_deref()
+                .map(|s| parse_pubkey(s, "--from-ata"))
+                .unwrap_or_else(|| WatchWallet::ata_for(&from_pk, &mint_pk));
+            let dest_ata = to_ata
+                .as_deref()
+                .map(|s| parse_pubkey(s, "--to-ata"))
+                .unwrap_or_else(|| WatchWallet::ata_for(&to_pk, &mint_pk));
+
+            eprintln!(
+                "[airsign] prepare token-transfer: {} → {} | mint {} | amount {} (decimals {}) | cluster: {}",
+                source_ata, dest_ata, mint_pk, amount, decimals, rpc_url
+            );
+
+            let wallet = WatchWallet::new(from_pk, &rpc_url);
+            let mut builder = wallet
+                .builder()
+                .token_transfer(source_ata, dest_ata, mint_pk, amount, decimals)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+            if let Some(text) = memo {
+                builder = builder.memo(text);
+            }
+
+            let tx = builder.build().unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+
+            write_tx_bin(&tx, &out);
+            eprintln!("[airsign] ✓ unsigned token-transfer tx written to {:?}", out);
+        }
+
+        // ── stake-withdraw ────────────────────────────────────────────────────
+        PrepareCommands::StakeWithdraw {
+            from,
+            stake_account,
+            to,
+            amount,
+            amount_all,
+            lamports: lamports_override,
+            memo,
+            cluster,
+            out,
+        } => {
+            let from_pk = parse_pubkey(&from, "--from");
+            let stake_pk = parse_pubkey(&stake_account, "--stake-account");
+            let to_pk = parse_pubkey(&to, "--to");
+            let rpc_url = resolve_cluster_url(&cluster);
+
+            let lamports = if let Some(lams) = lamports_override {
+                lams
+            } else if amount_all {
+                // Fetch current stake account balance via WatchWallet (no extra dep)
+                WatchWallet::new(stake_pk, rpc_url.clone())
+                    .balance()
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: cannot fetch stake account balance: {e}");
+                        std::process::exit(1);
+                    })
+            } else {
+                let sol = amount.unwrap_or_else(|| {
+                    eprintln!("error: one of --amount, --amount-all, or --lamports is required");
+                    std::process::exit(1);
+                });
+                sol_to_lamports(sol)
+            };
+
+            eprintln!(
+                "[airsign] prepare stake-withdraw: stake={} → {} | {} lamports | cluster: {}",
+                stake_pk, to_pk, lamports, rpc_url
+            );
+
+            let wallet = WatchWallet::new(from_pk, &rpc_url);
+            let mut builder = wallet.builder().stake_withdraw(stake_pk, to_pk, lamports);
+            if let Some(text) = memo {
+                builder = builder.memo(text);
+            }
+
+            let tx = builder.build().unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+
+            write_tx_bin(&tx, &out);
+            eprintln!("[airsign] ✓ unsigned stake-withdraw tx written to {:?}", out);
+        }
+    }
+}
+
+// ─── prepare helpers ──────────────────────────────────────────────────────────
+
+fn parse_pubkey(s: &str, flag: &str) -> solana_sdk::pubkey::Pubkey {
+    s.parse::<solana_sdk::pubkey::Pubkey>().unwrap_or_else(|e| {
+        eprintln!("error: invalid pubkey for {flag} {:?}: {e}", s);
+        std::process::exit(1);
+    })
+}
+
+fn write_tx_bin(tx: &solana_sdk::transaction::Transaction, path: &PathBuf) {
+    let bytes = bincode::serialize(tx).unwrap_or_else(|e| {
+        eprintln!("error: cannot serialise transaction: {e}");
+        std::process::exit(1);
+    });
+    std::fs::write(path, &bytes).unwrap_or_else(|e| {
+        eprintln!("error: cannot write {:?}: {e}", path);
+        std::process::exit(1);
+    });
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+fn resolve_password(opt: Option<String>, prompt: &str) -> String {
+    if let Some(p) = opt {
+        return p;
+    }
+    rpassword::prompt_password(prompt).unwrap_or_else(|e| {
+        eprintln!("error reading password: {e}");
+        std::process::exit(1);
+    })
+}
+
+// ─── squads sub-commands ──────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum SquadsCommands {
+    /// Derive the multisig and vault PDAs for a create key.
+    ///
+    /// Prints a JSON object with `multisig_pda`, `vault_pda`, and `bump`.
+    Pda {
+        /// The ephemeral create key (base58 pubkey) used as a PDA seed.
+        #[arg(long, value_name = "PUBKEY")]
+        create_key: String,
+    },
+
+    /// Build a `multisig_create_v2` instruction JSON.
+    ///
+    /// Prints an InstructionResult JSON to stdout.
+    Create {
+        /// The ephemeral create key (base58 pubkey).
+        #[arg(long, value_name = "PUBKEY")]
+        create_key: String,
+
+        /// Comma-separated member pubkeys.  All receive full permissions by default.
+        /// Prefix a pubkey with `voter:` to grant Voter-only permissions, or
+        /// `initiator:` for Initiator-only, or `executor:` for Executor-only.
+        #[arg(long, value_name = "PUBKEY,...")]
+        members: String,
+
+        /// Number of approvals required (M in M-of-N).
+        #[arg(long, value_name = "N")]
+        threshold: u16,
+
+        /// Time-lock in seconds (0 = no lock).
+        #[arg(long, default_value_t = 0)]
+        time_lock: u32,
+
+        /// Optional memo attached to the instruction.
+        #[arg(long, value_name = "TEXT")]
+        memo: Option<String>,
+    },
+
+    /// Build a `proposal_approve` instruction and wrap it in an AirSign payload JSON.
+    ///
+    /// The payload JSON can be piped to `airsign send` for QR transmission to
+    /// the air-gapped signer, which decodes it and signs the embedded transaction.
+    Approve {
+        /// Squads multisig PDA (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        multisig: String,
+
+        /// Index of the proposal / vault transaction to approve.
+        #[arg(long, value_name = "N")]
+        tx_index: u64,
+
+        /// Public key of the approving member (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        approver: String,
+
+        /// Optional memo.
+        #[arg(long, value_name = "TEXT")]
+        memo: Option<String>,
+    },
+
+    /// Build a `vault_transaction_create` + `proposal_create` instruction pair JSON.
+    ///
+    /// The inner message is supplied as a base64-encoded bincode `Message`.
+    Propose {
+        /// Squads multisig PDA (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        multisig: String,
+
+        /// Creator/fee-payer public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        creator: String,
+
+        /// Transaction index for the new proposal (must be next unused index).
+        #[arg(long, value_name = "N")]
+        tx_index: u64,
+
+        /// Base64-encoded bincode `solana_sdk::message::Message` to embed.
+        #[arg(long, value_name = "B64")]
+        message: String,
+
+        /// Vault index (default: 0).
+        #[arg(long, default_value_t = 0)]
+        vault_index: u8,
+
+        /// Optional memo.
+        #[arg(long, value_name = "TEXT")]
+        memo: Option<String>,
+    },
+
+    /// Build a config transaction that adds a member.
+    #[command(name = "add-member")]
+    AddMember {
+        /// Squads multisig PDA (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        multisig: String,
+
+        /// Creator/fee-payer public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        creator: String,
+
+        /// Config transaction index.
+        #[arg(long, value_name = "N")]
+        tx_index: u64,
+
+        /// New member public key (base58).  Use `voter:`, `initiator:`, or
+        /// `executor:` prefix for limited permissions; no prefix = full.
+        #[arg(long, value_name = "PUBKEY")]
+        member: String,
+
+        /// Optional memo.
+        #[arg(long, value_name = "TEXT")]
+        memo: Option<String>,
+    },
+
+    /// Build a config transaction that removes a member.
+    #[command(name = "remove-member")]
+    RemoveMember {
+        /// Squads multisig PDA (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        multisig: String,
+
+        /// Creator/fee-payer public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        creator: String,
+
+        /// Config transaction index.
+        #[arg(long, value_name = "N")]
+        tx_index: u64,
+
+        /// Public key of the member to remove (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        member: String,
+
+        /// Optional memo.
+        #[arg(long, value_name = "TEXT")]
+        memo: Option<String>,
+    },
+
+    /// Build a config transaction that changes the approval threshold.
+    #[command(name = "change-threshold")]
+    ChangeThreshold {
+        /// Squads multisig PDA (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        multisig: String,
+
+        /// Creator/fee-payer public key (base58).
+        #[arg(long, value_name = "PUBKEY")]
+        creator: String,
+
+        /// Config transaction index.
+        #[arg(long, value_name = "N")]
+        tx_index: u64,
+
+        /// New threshold value.
+        #[arg(long, value_name = "N")]
+        threshold: u16,
+
+        /// Optional memo.
+        #[arg(long, value_name = "TEXT")]
+        memo: Option<String>,
+    },
+}
+
+// ─── cmd_squads ───────────────────────────────────────────────────────────────
+
+fn cmd_squads(sub: SquadsCommands) {
+    use afterimage_squads::{
+        adapter::{build_airsign_payload, payload_to_json},
+        config_tx::{add_member_ix, change_threshold_ix, remove_member_ix},
+        multisig::{create_multisig_json, derive_pda_info, instruction_to_json},
+        types::{ApprovalRequest, Member, MultisigConfig, VaultTransactionRequest},
+        vault_tx::{proposal_create_ix, vault_transaction_create_ix},
+    };
+    use solana_sdk::hash::Hash;
+
+    match sub {
+        // ── pda ───────────────────────────────────────────────────────────────
+        SquadsCommands::Pda { create_key } => {
+            let info = derive_pda_info(&create_key).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            println!("{}", serde_json::to_string_pretty(&info).unwrap());
+        }
+
+        // ── create ────────────────────────────────────────────────────────────
+        SquadsCommands::Create { create_key, members, threshold, time_lock, memo } => {
+            let parsed_members: Vec<Member> = members
+                .split(',')
+                .map(|s| {
+                    let s = s.trim();
+                    if let Some(k) = s.strip_prefix("voter:") {
+                        Member::voter(k)
+                    } else if let Some(k) = s.strip_prefix("initiator:") {
+                        Member::initiator(k)
+                    } else if let Some(k) = s.strip_prefix("executor:") {
+                        Member::executor(k)
+                    } else {
+                        Member::full(s)
+                    }
+                })
+                .collect();
+
+            let config = MultisigConfig {
+                create_key,
+                members: parsed_members,
+                threshold,
+                time_lock,
+                memo,
+            };
+            let result = create_multisig_json(&config).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            println!("{}", serde_json::to_string_pretty(&result).unwrap());
+        }
+
+        // ── approve ───────────────────────────────────────────────────────────
+        SquadsCommands::Approve { multisig, tx_index, approver, memo } => {
+            let req = ApprovalRequest {
+                multisig_pda: multisig,
+                transaction_index: tx_index,
+                approver,
+                memo,
+            };
+            let payload = build_airsign_payload(&req, Hash::default()).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            eprintln!("[airsign] squads approve: {}", payload.label);
+            eprintln!("[airsign]   pipe this JSON to `airsign send` for QR transmission");
+            println!("{}", payload_to_json(&payload).unwrap());
+        }
+
+        // ── propose ───────────────────────────────────────────────────────────
+        SquadsCommands::Propose { multisig, creator, tx_index, message, vault_index, memo } => {
+            let req = VaultTransactionRequest {
+                multisig_pda: multisig.clone(),
+                creator: creator.clone(),
+                vault_index,
+                transaction_message_b64: message,
+                ephemeral_signers: 0,
+                memo: memo.clone(),
+            };
+            let vault_ix = vault_transaction_create_ix(&req, tx_index).unwrap_or_else(|e| {
+                eprintln!("error building vault_transaction_create: {e}");
+                std::process::exit(1);
+            });
+            let proposal_ix = proposal_create_ix(&multisig, &creator, tx_index, false)
+                .unwrap_or_else(|e| {
+                    eprintln!("error building proposal_create: {e}");
+                    std::process::exit(1);
+                });
+
+            let output = serde_json::json!({
+                "vault_transaction_create": instruction_to_json(&vault_ix),
+                "proposal_create": instruction_to_json(&proposal_ix),
+            });
+            println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        }
+
+        // ── add-member ────────────────────────────────────────────────────────
+        SquadsCommands::AddMember { multisig, creator, tx_index, member, memo } => {
+            let m = if let Some(k) = member.strip_prefix("voter:") {
+                Member::voter(k)
+            } else if let Some(k) = member.strip_prefix("initiator:") {
+                Member::initiator(k)
+            } else if let Some(k) = member.strip_prefix("executor:") {
+                Member::executor(k)
+            } else {
+                Member::full(&member)
+            };
+            let ix = add_member_ix(&multisig, &creator, tx_index, m, memo).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            println!("{}", serde_json::to_string_pretty(&instruction_to_json(&ix)).unwrap());
+        }
+
+        // ── remove-member ─────────────────────────────────────────────────────
+        SquadsCommands::RemoveMember { multisig, creator, tx_index, member, memo } => {
+            let ix = remove_member_ix(&multisig, &creator, tx_index, &member, memo)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+            println!("{}", serde_json::to_string_pretty(&instruction_to_json(&ix)).unwrap());
+        }
+
+        // ── change-threshold ──────────────────────────────────────────────────
+        SquadsCommands::ChangeThreshold { multisig, creator, tx_index, threshold, memo } => {
+            let ix = change_threshold_ix(&multisig, &creator, tx_index, threshold, memo)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+            println!("{}", serde_json::to_string_pretty(&instruction_to_json(&ix)).unwrap());
+        }
+    }
+}

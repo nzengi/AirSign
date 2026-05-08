@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<!--
+  airsign_bridge.html — Headless WASM bridge for AirSign mobile (v2.2)
+
+  v2.2 changes vs v2.1:
+  · importKeypair(callId, privateKeyBase58) — accepts a 32-byte seed or 64-byte
+    nacl-format private key in base58.  Validates, derives pubkey via WASM,
+    persists secret to native via saveSecretToNative(), warms memory cache, and
+    returns { id, pubkeyHex, pubkeyBase58 }.  Duplicate-key detection included.
+  · renameKeypair(callId, id, newLabel) — no-op at the crypto layer; label
+    management is a UI-layer concern.  Resolves immediately with null.
+  · Inline base58Decode / toHex helpers (no external deps).
+-->
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AirSign Bridge</title>
+</head>
+<body style="display:none;margin:0;padding:0;">
+<script type="module">
+// ─── Load WASM ───────────────────────────────────────────────────────────────
+import init, {
+  WasmKeypair,
+  WasmSendSession,
+  WasmRecvSession,
+} from "./wasm/afterimage_wasm.js";
+
+// ─── Platform: send result / error back to native ────────────────────────────
+
+function sendResult(callId, result) {
+  const payload = JSON.stringify({ callId, ok: true, result });
+  if (window.webkit?.messageHandlers?.airSignResult) {
+    window.webkit.messageHandlers.airSignResult.postMessage(payload);
+  } else if (window.AirSignBridge) {
+    window.AirSignBridge.postResult(callId, payload);
+  }
+}
+
+function sendError(callId, message) {
+  const payload = JSON.stringify({ callId, ok: false, error: String(message) });
+  if (window.webkit?.messageHandlers?.airSignResult) {
+    window.webkit.messageHandlers.airSignResult.postMessage(payload);
+  } else if (window.AirSignBridge) {
+    window.AirSignBridge.postResult(callId, payload);
+  }
+}
+
+// ─── Platform: persist secret key to native secure store ─────────────────────
+//
+// Called INSIDE generateKeypair / importKeypair before sendResult() so the
+// secret is always stored before the Promise resolves.  The secret never
+// reaches the RN layer.
+//
+// iOS  → WKScriptMessageHandler "airSignSaveSecret"  body: JSON {id, secretHex}
+// Android → AirSignBridge.saveSecret(id, secretHex)  @JavascriptInterface
+//
+function saveSecretToNative(id, secretHex) {
+  const body = JSON.stringify({ id, secretHex });
+  if (window.webkit?.messageHandlers?.airSignSaveSecret) {
+    window.webkit.messageHandlers.airSignSaveSecret.postMessage(body);
+  } else if (window.AirSignBridge) {
+    window.AirSignBridge.saveSecret(id, secretHex);
+  }
+}
+
+// ─── Base58 helpers ───────────────────────────────────────────────────────────
+
+const B58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+function base58Decode(str) {
+  const table = {};
+  for (let i = 0; i < B58_ALPHABET.length; i++) table[B58_ALPHABET[i]] = i;
+  const bytes = [];
+  for (const c of str) {
+    let carry = table[c];
+    if (carry === undefined) throw new Error(`Invalid base58 character: ${c}`);
+    for (let j = 0; j < bytes.length; j++) {
+      carry += bytes[j] * 58;
+      bytes[j] = carry & 0xff;
+      carry >>>= 8;
+    }
+    while (carry > 0) { bytes.push(carry & 0xff); carry >>>= 8; }
+  }
+  const leadingOnes = [...str].findIndex(c => c !== '1');
+  const prefix = leadingOnes === -1 ? 0 : leadingOnes;
+  const result = new Uint8Array(prefix + bytes.length);
+  bytes.reverse().forEach((b, i) => { result[prefix + i] = b; });
+  return result;
+}
+
+function toHex(bytes) {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// ─── UUID generator (crypto.randomUUID with fallback) ─────────────────────────
+
+function generateUUID() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  // RFC 4122 v4 fallback
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = crypto.getRandomValues(new Uint8Array(1))[0] & 15;
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
+
+// ─── Fountain decoder session registry ───────────────────────────────────────
+const recvSessions = new Map();
+
+// ─── In-memory keypair store ──────────────────────────────────────────────────
+// Warmed on startup by restoreKeypairs() and updated by generateKeypair() /
+// importKeypair().  Maps id → secretKeyHex string.
+const keypairs = new Map();
+
+// ─── AirSign API ──────────────────────────────────────────────────────────────
+window.AirSign = {
+
+  // ── Key management ──────────────────────────────────────────────────────────
+
+  /**
+   * Generate a new Ed25519 keypair.
+   *
+   * Flow:
+   *   1. WASM generates keypair entirely inside linear memory.
+   *   2. secret hex pushed to native Keychain/Keystore via saveSecretToNative.
+   *   3. Keypair cached in this page's memory Map.
+   *   4. { id, pubkeyHex, pubkeyBase58 } sent back — secret NOT included.
+   */
+  async generateKeypair(callId) {
+    try {
+      const kp         = new WasmKeypair();
+      const id         = kp.id();
+      const secretHex  = kp.secret_key_hex();
+      const pubkeyHex  = kp.public_key_hex();
+      const pubkeyB58  = kp.public_key_base58();
+      kp.free();
+
+      // Persist to native BEFORE resolving.
+      saveSecretToNative(id, secretHex);
+
+      // Warm memory cache.
+      keypairs.set(id, secretHex);
+
+      sendResult(callId, { id, pubkeyHex, pubkeyBase58: pubkeyB58 });
+    } catch(e) { sendError(callId, e); }
+  },
+
+  /**
+   * Import an existing Ed25519 keypair from a base58-encoded private key.
+   *
+   * Accepts:
+   *   · 32-byte seed (Solana Keypair.fromSeed format) — base58 of 32 bytes
+   *   · 64-byte nacl secret key (seed + pubkey concatenated) — base58 of 64 bytes
+   *     (first 32 bytes are used as seed)
+   *
+   * Flow:
+   *   1. Decode base58 → validate length → extract 32-byte seed.
+   *   2. Derive pubkey via WasmKeypair.from_secret_hex().
+   *   3. Duplicate-key detection against current memory cache.
+   *   4. Persist to native Keychain/Keystore via saveSecretToNative().
+   *   5. Warm memory cache.
+   *   6. Return { id, pubkeyHex, pubkeyBase58 } — secret NOT returned.
+   */
+  async importKeypair(callId, privateKeyBase58) {
+    try {
+      const decoded = base58Decode(privateKeyBase58.trim());
+
+      let seedBytes;
+      if (decoded.length === 32) {
+        seedBytes = decoded;
+      } else if (decoded.length === 64) {
+        seedBytes = decoded.slice(0, 32);
+      } else {
+        throw new Error(
+          `Invalid private key length: expected 32 or 64 bytes, got ${decoded.length}`
+        );
+      }
+
+      const secretHex = toHex(seedBytes);
+
+      // Derive pubkey inside WASM.
+      const kp         = WasmKeypair.from_secret_hex(secretHex);
+      const pubkeyHex  = kp.public_key_hex();
+      const pubkeyB58  = kp.public_key_base58();
+      kp.free();
+
+      // Duplicate-key detection: compare pubkeys against all cached keypairs.
+      for (const [, existingSecret] of keypairs.entries()) {
+        const existing    = WasmKeypair.from_secret_hex(existingSecret);
+        const existingPub = existing.public_key_hex();
+        existing.free();
+        if (existingPub === pubkeyHex) {
+          throw new Error('This key is already in your keystore.');
+        }
+      }
+
+      // Assign a new unique ID.
+      const id = generateUUID();
+
+      // Persist to native BEFORE resolving.
+      saveSecretToNative(id, secretHex);
+
+      // Warm memory cache.
+      keypairs.set(id, secretHex);
+
+      sendResult(callId, { id, pubkeyHex, pubkeyBase58: pubkeyB58 });
+    } catch(e) { sendError(callId, e); }
+  },
+
+  /**
+   * Rename a keypair.  Label management is a UI-layer concern; this is a no-op
+   * at the crypto bridge layer.  Resolves immediately with null.
+   */
+  async renameKeypair(callId, id, newLabel) {
+    // No-op: labels live in AsyncStorage on the RN side, not in the WASM bridge.
+    sendResult(callId, null);
+  },
+
+  /**
+   * Bulk-restore keypairs from native secure store into the WASM memory cache.
+   * Called by the native layer immediately after bridgeDidBecomeReady.
+   *
+   * @param keysJson  JSON array: [{ id: string, secretHex: string }, …]
+   */
+  async restoreKeypairs(callId, keysJson) {
+    try {
+      const keys = JSON.parse(keysJson);
+      for (const { id, secretHex } of keys) {
+        keypairs.set(id, secretHex);
+      }
+      sendResult(callId, { restored: keys.length });
+    } catch(e) { sendError(callId, e); }
+  },
+
+  /**
+   * Load a single keypair from its secret hex (used for lazy on-demand load
+   * when the cache is cold for a specific id).
+   */
+  async loadKeypair(callId, id, secretKeyHex) {
+    try {
+      const kp = WasmKeypair.from_secret_hex(secretKeyHex);
+      keypairs.set(id, secretKeyHex);
+      sendResult(callId, {
+        id,
+        pubkeyHex:    kp.public_key_hex(),
+        pubkeyBase58: kp.public_key_base58(),
+      });
+      kp.free();
+    } catch(e) { sendError(callId, e); }
+  },
+
+  /** Evict a keypair from the memory cache. */
+  async deleteKeypair(callId, id) {
+    keypairs.delete(id);
+    sendResult(callId, null);
+  },
+
+  // ── Signing ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Sign a Solana transaction (base64-encoded wire format).
+   * Requires the keypair to be in the memory cache (either warmed on startup
+   * by restoreKeypairs or lazily loaded by the native ensureLoaded helper).
+   * Returns { signatureHex, signatureBase58 }.
+   */
+  async signTransaction(callId, id, txBase64) {
+    try {
+      const secretHex = keypairs.get(id);
+      if (!secretHex) throw new Error(`Keypair ${id} not in cache`);
+      const kp  = WasmKeypair.from_secret_hex(secretHex);
+      const sig = kp.sign_transaction_base64(txBase64);
+      sendResult(callId, {
+        signatureHex:    sig.hex(),
+        signatureBase58: sig.base58(),
+      });
+      kp.free(); sig.free();
+    } catch(e) { sendError(callId, e); }
+  },
+
+  /**
+   * Sign an arbitrary message (base64-encoded bytes).
+   * Returns { signatureHex, signatureBase58 }.
+   */
+  async signMessage(callId, id, messageBase64) {
+    try {
+      const secretHex = keypairs.get(id);
+      if (!secretHex) throw new Error(`Keypair ${id} not in cache`);
+      const kp  = WasmKeypair.from_secret_hex(secretHex);
+      const sig = kp.sign_message_base64(messageBase64);
+      sendResult(callId, {
+        signatureHex:    sig.hex(),
+        signatureBase58: sig.base58(),
+      });
+      kp.free(); sig.free();
+    } catch(e) { sendError(callId, e); }
+  },
+
+  // ── Transaction inspection ────────────────────────────────────────────────────
+
+  async inspectTransaction(callId, txBase64) {
+    try {
+      const result = JSON.parse(inspectTransactionJson(txBase64));
+      sendResult(callId, result);
+    } catch(e) { sendError(callId, e); }
+  },
+
+  // ── Fountain encode/decode ────────────────────────────────────────────────────
+
+  async fountainEncode(callId, payloadBase64, targetFrames) {
+    try {
+      const bytes   = Uint8Array.from(atob(payloadBase64), c => c.charCodeAt(0));
+      const session = new WasmSendSession(bytes, "", "");
+      const frames  = [];
+      let count = 0;
+      while (session.has_next() && count < targetFrames) {
+        const frame = session.next_frame();
+        frames.push(btoa(String.fromCharCode(...frame)));
+        count++;
+      }
+      sendResult(callId, { frames, totalFrames: count });
+      session.free();
+    } catch(e) { sendError(callId, e); }
+  },
+
+  async fountainDecodeAdd(callId, sessionId, frameBase64, totalBlocks) {
+    try {
+      if (!recvSessions.has(sessionId)) {
+        recvSessions.set(sessionId, new WasmRecvSession(""));
+      }
+      const session = recvSessions.get(sessionId);
+      const bytes   = Uint8Array.from(atob(frameBase64), c => c.charCodeAt(0));
+      session.ingest_frame(bytes);
+      if (session.is_complete()) {
+        const data    = session.get_data();
+        const payload = btoa(String.fromCharCode(...data));
+        recvSessions.delete(sessionId);
+        session.free();
+        sendResult(callId, { complete: true, payload });
+      } else {
+        sendResult(callId, { complete: false });
+      }
+    } catch(e) { sendError(callId, e); }
+  },
+
+  async fountainDecodeReset(callId, sessionId) {
+    const session = recvSessions.get(sessionId);
+    if (session) { session.free(); recvSessions.delete(sessionId); }
+    sendResult(callId, null);
+  },
+};
+
+// ─── Initialise WASM ─────────────────────────────────────────────────────────
+(async () => {
+  try {
+    await init("./wasm/afterimage_wasm_bg.wasm");
+    // Signal ready — native will immediately call restoreKeypairs().
+    if (window.webkit?.messageHandlers?.airSignReady) {
+      window.webkit.messageHandlers.airSignReady.postMessage("ready");
+    } else if (window.AirSignBridge) {
+      window.AirSignBridge.onReady();
+    }
+  } catch(e) {
+    console.error("[AirSign bridge] WASM init failed:", e);
+  }
+})();
+</script>
+</body>
+</html>

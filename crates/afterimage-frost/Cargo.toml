@@ -1,0 +1,30 @@
+[package]
+name        = "afterimage-frost"
+description = "FROST threshold signature scheme (RFC 9591 / ZF FROST) for AirSign air-gapped signing"
+version.workspace     = true
+edition.workspace     = true
+authors.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+keywords     = ["frost", "threshold", "signature", "ed25519", "air-gap"]
+categories   = ["cryptography"]
+
+[dependencies]
+# ZF FROST — RFC 9591 compliant, uses curve25519-dalek v4 (same as ed25519-dalek v2)
+frost-ed25519 = { workspace = true }
+
+# rand_core 0.6 is what frost-ed25519 2.x expects
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+serde      = { workspace = true }
+serde_json = { workspace = true }
+hex        = { workspace = true }
+thiserror  = { workspace = true }
+zeroize    = { workspace = true }
+
+# getrandom 0.2 (js feature) is required on wasm32 so that rand_core::OsRng works in-browser
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+rand = { workspace = true }

@@ -1,0 +1,36 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_wasmrecvsession_free: (a: number, b: number) => void;
+export const __wbg_wasmsendsession_free: (a: number, b: number) => void;
+export const decode_base64: (a: number, b: number, c: number) => void;
+export const decode_hex: (a: number, b: number, c: number) => void;
+export const encode_base64: (a: number, b: number, c: number) => void;
+export const encode_hex: (a: number, b: number, c: number) => void;
+export const recommended_frames: (a: number) => number;
+export const start: () => void;
+export const version: (a: number) => void;
+export const wasmrecvsession_filename: (a: number, b: number) => void;
+export const wasmrecvsession_get_data: (a: number, b: number) => void;
+export const wasmrecvsession_ingest_frame: (a: number, b: number, c: number) => number;
+export const wasmrecvsession_is_complete: (a: number) => number;
+export const wasmrecvsession_new: (a: number, b: number) => number;
+export const wasmrecvsession_original_size: (a: number) => number;
+export const wasmrecvsession_progress: (a: number) => number;
+export const wasmrecvsession_protocol_version: (a: number) => number;
+export const wasmrecvsession_received_count: (a: number) => bigint;
+export const wasmsendsession_droplet_count: (a: number) => number;
+export const wasmsendsession_frame_index: (a: number) => number;
+export const wasmsendsession_has_next: (a: number) => number;
+export const wasmsendsession_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+export const wasmsendsession_next_frame: (a: number, b: number) => void;
+export const wasmsendsession_progress: (a: number) => number;
+export const wasmsendsession_recommended_droplet_count: (a: number) => number;
+export const wasmsendsession_set_limit: (a: number, b: number) => void;
+export const wasmsendsession_total_frames: (a: number) => number;
+export const __wbindgen_export: (a: number) => void;
+export const __wbindgen_add_to_stack_pointer: (a: number) => number;
+export const __wbindgen_export2: (a: number, b: number) => number;
+export const __wbindgen_export3: (a: number, b: number, c: number, d: number) => number;
+export const __wbindgen_export4: (a: number, b: number, c: number) => void;
+export const __wbindgen_start: () => void;
